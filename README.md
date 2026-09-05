@@ -1,3 +1,26 @@
+# RISC-V Vector Primer 中文译本
+
+**[开始阅读中文译本](zh-CN/README.md)** · [术语表](zh-CN/GLOSSARY.md) · [翻译与授权说明](zh-CN/TRANSLATION-NOTICE.md)
+
+本仓库由 Ch'in 维护，收录经原作者邮件许可、用于非商业技术教育的非官方简体中文译本。原作者未审校中文译文，授权不代表对译文的背书。
+
+原作作者为 **Thang Minh Tran、Paul Miller**，编辑为 **Jonah McLeod**，出版方为 **Simplex Micro**。译文基于[英文原仓库](https://github.com/simplex-micro/riscv-vector-primer)的 `fc66957a6458842beeabe9d85065ff334ccbd333`（2026-07-25）。保留原作 [CC BY-NC-ND 4.0 许可证](LICENSE)，翻译发布依据另行取得的邮件许可。
+
+> **支持原作，向作者反馈**：原作者特别希望读者访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并通过官网提供的联系渠道分享阅读反馈。欢迎用简短英文说明哪些章节对你有帮助、哪些概念还不够清楚，或希望增加哪些实例。中文翻译的措辞、错字及译注问题，请在本仓库提交 [Issue](https://github.com/Ch1-n/riscv-vector-primer-zh-CN/issues)，由译者跟进。
+
+## 中文目录
+
+- [第一章](zh-CN/chapter-01.md)
+- [第二章](zh-CN/chapter-02.md)
+- [第三章](zh-CN/chapter-03.md)
+- [第四章](zh-CN/chapter-04.md)
+- [第五章](zh-CN/chapter-05.md)
+- [第六章](zh-CN/chapter-06.md)
+
+以下保留英文原作 README，便于对照与引用。
+
+---
+
 # 📘 RISC-V Vector Primer
 
 An implementation-focused guide to the RISC-V Vector Extension (RVV 1.0) and the emerging Matrix Extension — written for architects, compiler engineers, and embedded/edge AI developers.
