@@ -92,7 +92,8 @@ SEW 与 LMUL 共同决定 VLMAX，即一条向量指令最多能够处理的元�
 | `010` | 4 | 4×VLEN/SEW | 8 |
 | `011` | 8 | 8×VLEN/SEW | 4 |
 
-**图 2-1　不同 LMUL 设置下的 VLMAX 计算。**`VLMAX = LMUL × VLEN / SEW`，表示一条向量指令最多能够操作的元素数。对于本章描述的 512 位实现，若 SEW=32 位，则 LMUL=1 时 VLMAX=16，LMUL=8 时 VLMAX=128。
+**图 2-1　不同 LMUL 设置下的 VLMAX 计算。**
+`VLMAX = LMUL × VLEN / SEW`，表示一条向量指令最多能够操作的元素数。对于本章描述的 512 位实现，若 SEW=32 位，则 LMUL=1 时 VLMAX=16，LMUL=8 时 VLMAX=128。
 
 *改编自《RISC-V Vector Extension Specification, Version 1.0》。*
 
@@ -170,7 +171,8 @@ RVV 是 RISC-V ISA 的扩展，并不是一台独立处理器。在本章的实�
 
 ![RISC-V 向量处理器高层架构](images/fig2-2-vector-processor-architecture.png)
 
-**图 2-2　RISC-V 向量处理器高层架构。**VPU 作为协处理器与标量核并行工作，拥有自己的 512 位寄存器文件和功能单元。两者共享内存系统；但标量访问与向量访问的数据规模和地址区域往往不同，因此实际设计可能为它们安排不同的缓存层次或访问路径。
+**图 2-2　RISC-V 向量处理器高层架构。**
+VPU 作为协处理器与标量核并行工作，拥有自己的 512 位寄存器文件和功能单元。两者共享内存系统；但标量访问与向量访问的数据规模和地址区域往往不同，因此实际设计可能为它们安排不同的缓存层次或访问路径。
 
 *改编自《RISC-V Vector Extension Specification, Version 1.0》。*
 
@@ -212,7 +214,8 @@ RVV 是 RISC-V ISA 的扩展，并不是一台独立处理器。在本章的实�
 
 ![VLEN 从 64 位扩展到 512 位时的元素打包](images/fig2-3c-element-packing-vlen512.png)
 
-**图 2-3　LMUL=1 时，不同 VLEN 和 SEW 下向量寄存器中的元素打包。**各行中的元素编号 0、1、2 等表示对应元素占据的字节位置；空白格表示该字节属于一个多字节元素。例如 SEW=16 位时，元素 0 占字节 0～1，元素 1 占字节 2～3，依此类推。
+**图 2-3　LMUL=1 时，不同 VLEN 和 SEW 下向量寄存器中的元素打包。**
+各行中的元素编号 0、1、2 等表示对应元素占据的字节位置；空白格表示该字节属于一个多字节元素。例如 SEW=16 位时，元素 0 占字节 0～1，元素 1 占字节 2～3，依此类推。
 
 *改编自《RISC-V Vector Extension Specification, Version 1.0》的“Mapping for LMUL = 1”节，RISC-V International，CC BY 4.0。*
 
@@ -281,7 +284,8 @@ RVV 是 RISC-V ISA 的扩展，并不是一台独立处理器。在本章的实�
 
 ![LMUL=2 时的寄存器分组与元素分布](images/fig2-4b-register-grouping-lmul2.png)
 
-**图 2-4　LMUL=4 时，元素在四个 128 位寄存器中的打包方式。**对于本章的 512 位实现，LMUL=8 可让八个 512 位寄存器组成一个 4096 位逻辑向量，其容量与 Cray-1 等经典向量机相当。
+**图 2-4　LMUL=4 时，元素在四个 128 位寄存器中的打包方式。**
+对于本章的 512 位实现，LMUL=8 可让八个 512 位寄存器组成一个 4096 位逻辑向量，其容量与 Cray-1 等经典向量机相当。
 
 *改编自《RISC-V Vector Extension Specification, Version 1.0》的“Mapping for LMUL > 1”节，RISC-V International，CC BY 4.0。*
 
@@ -289,7 +293,8 @@ RISC-V 还支持 1/2、1/4、1/8 等分数 LMUL，以便高效处理混合位宽
 
 ![VLEN=128 位、LMUL=1/4 的分数 LMUL 示例](images/fig2-5-fractional-lmul.png)
 
-**图 2-5　分数 LMUL 示例（LMUL=1/4、VLEN=128 位）。**当 LMUL=1/4、SEW=8 位时，只有 4 个元素，即字节 0～3，处于活动范围；其余字节是尾部元素，以短横线表示。这使混合位宽数据可以更高效地使用向量寄存器。
+**图 2-5　分数 LMUL 示例（LMUL=1/4、VLEN=128 位）。**
+当 LMUL=1/4、SEW=8 位时，只有 4 个元素，即字节 0～3，处于活动范围；其余字节是尾部元素，以短横线表示。这使混合位宽数据可以更高效地使用向量寄存器。
 
 *改编自《RISC-V Vector Extension Specification, Version 1.0》的“Mapping for LMUL < 1”节，RISC-V International，CC BY 4.0。*
 
@@ -333,7 +338,8 @@ for (int i = 0; i < N; i++) {
 
 ![SAXPY 循环的 RISC-V 向量汇编](images/fig2-6-saxpy-assembly.png)
 
-**图 2-6　SAXPY 循环 `y[i] += a * x[i]` 的分段处理示例。**`vsetvli` 根据剩余元素数动态设置 `vl`，循环持续执行到全部元素处理完成。该代码不依赖硬件的具体 VLEN，因而能够跨不同向量实现运行。
+**图 2-6　SAXPY 循环 `y[i] += a * x[i]` 的分段处理示例。**
+`vsetvli` 根据剩余元素数动态设置 `vl`，循环持续执行到全部元素处理完成。该代码不依赖硬件的具体 VLEN，因而能够跨不同向量实现运行。
 
 *原作将该分段处理模式归于《RISC-V Vector Extension Specification, Version 1.0》，RISC-V International，CC BY 4.0；配置规则可参阅“Constraints on Setting `vl`”节。*
 
