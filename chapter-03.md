@@ -1,505 +1,604 @@
-# Chapter 3: RISC-V Vector Extension Fundamentals
+# 第 3 章：RISC-V 向量扩展基础
 
-Before diving into the architectural details of vector processor implementation, we must first understand the fundamental concepts that define the RISC-V Vector Extension ISA. These concepts—element width, vector length, register grouping, and masking—form the vocabulary that architects and programmers use to reason about vector computation. Getting these basics right is essential, because every design decision in a vector processor ultimately traces back to how these parameters interact.
+> 本文是 *RISC-V Vector Primer* 的非官方中文译文，经原作者邮件许可，用于非商业技术教育。
+>
+> 原作者：Thang Minh Tran、Paul Miller；编辑：Jonah McLeod；出版方：Simplex Micro。中文翻译：Ch'in。
+>
+> [英文原作](https://github.com/simplex-micro/riscv-vector-primer) · 依据版本：`fc66957a6458842beeabe9d85065ff334ccbd333`（2026-07-25）。授权摘要及译注原则见[翻译说明](TRANSLATION-NOTICE.md)。原作者未审校中文译文。
+>
+> **支持原作：**作者特别欢迎中文读者访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并分享阅读反馈与改进建议。文末附有反馈说明。
 
----
-
-## 3.1 The Register-Centric Execution Model
-
-The RISC-V Vector Extension follows a strictly register-centric execution model. All vector operations execute between vector registers, with only load and store instructions accessing memory. This is the foundation of the RISC philosophy: only load/store instructions touch memory; everything else operates on registers.
-
-This stands in contrast to some other vector memory ISAs where vector operations can directly access data memory. The register-centric approach offers a clean separation of concerns: the memory system handles data movement, while the functional units focus purely on computation. This separation simplifies both hardware design and software reasoning about performance.
-
-The basic requirement is straightforward: vector data consists of N elements, each M bits wide. The element width M must be a power of two, and the total vector register length is simply N × M. These constraints enable efficient hardware implementation and leave both N and M flexible through the SEW (Selected Element Width) and LMUL (Length Multiplier) parameters.
+前两章建立了整体印象，本章回到编程模型，系统梳理 RISC-V 向量 ISA 的基础。元素位宽、向量长度、寄存器分组和掩码，是架构师与程序员讨论向量计算的共同语言。理解它们如何配合，才能看清后续硬件设计中的取舍。
 
 ---
 
-## 3.2 Core Parameters and Terminology
+## 3.1 以寄存器为中心的执行模型
 
-Understanding the RISC-V Vector Extension (RVV) requires familiarity with several key parameters that appear throughout the specification and implementation. These terms recur constantly in vector programming and hardware design, so precise understanding is essential. They determine the register layout, element count, memory behavior, and microarchitectural decomposition of instructions.
+RISC-V 向量扩展采用加载-存储式执行模型。向量算术指令不会直接把数据内存作为操作数：向量数据来自 VRF，其他操作数可以来自标量寄存器或指令中的立即数；内存与 VRF 之间的数据搬运则由向量加载/存储指令负责。这延续了 RISC 的基本原则：访存与计算分离。
 
-**SEW (Selected Element Width)** specifies the width of a single vector element in bits. The supported values are 8, 16, 32, and 64 bits—all powers of two. RVV ISA specifications reserve additional encodings for larger widths like 128 bits, though this remains uncommon.
+有些向量 ISA 允许计算指令直接读取内存，RVV 则不同。以寄存器为中心的设计划清了职责：内存系统搬运数据，功能单元执行计算。这既有利于简化硬件，也让软件更容易分析性能。
 
-**VLEN (Vector Register Length)** defines the width of a single vector register in bits. This is a design-time constant fixed at implementation. A common implementation choice is VLEN equal to 512 bits, though 1024, 256 and 128 bits are also widely supported. Throughout this chapter, we use 512 bits as the running example.
-
-**VLMAX (Maximum Vector Length)** defines the hardware capacity: the maximum number of elements a vector register group can hold, calculated as VLEN ÷ SEW and scaled by LMUL.
-
-**LMUL** controls register grouping, allowing multiple architectural registers to be treated as a single logical register. This mechanism dramatically extends the effective vector length without requiring wider physical registers.
-
-One important concept in RVV is that the number of defined elements is set by the VLEN, LMUL, and SEW for all vector instructions. For example, the program can set LMUL=4, SEW=32-bit, thus the number of elements is 512/32×4 = 64. The vector load instructions can be for 8-bit in which case the vector load instruction is for a single vector register where 512-bit/8-bit = 64 elements. The vector load instruction can be programmed to be 8, 16, 32, or 64-bit, and the hardware must load 64 elements into vector registers. The RVV ISA includes instructions to extend or to reduce the width of the elements, the element width can be extended to 0.5×, 2×, 4×, or 8×, but the number of elements will be 64 elements. The number of vector registers per instruction is limited to 8 vector registers, the extended width cannot use more than 8 vector registers in which the illegal instruction is asserted. In this example, the instruction with the width extension of 8× is illegal instruction.
-
-**VL (Vector Length)** defines the software usage: the actual number of elements a program chooses to operate on, which can range from 0 up to VLMAX. This separation between capacity and usage allows efficient handling of data sets that don't align with hardware width. If the programmer attempts to set the VL greater than VLMAX, then the hardware will default VL to be VLMAX.
+基本关系并不复杂：一组向量数据包含 N 个元素，每个元素宽 M 位，数据总量就是 N×M 位。元素位宽 M 取 2 的幂。SEW（选定元素位宽）和 LMUL（寄存器组倍增系数）让软件能够灵活调整元素宽度与有效元素数，同时仍保持规整、易于实现的硬件结构。
 
 ---
 
-## 3.3 Functional Unit Organization
+## 3.2 核心参数与术语
 
-A vector processor comprises both scalar and vector functional units. Scalar execution proceeds as in standard RV64 or RV32, while the vector side consists of:
+理解 RISC-V 向量扩展，首先要熟悉规范和实现文档中反复出现的几个参数。它们决定寄存器布局、元素数量和访存语义，也会影响指令在微架构内部如何拆分。
 
-- **Vector Arithmetic Logical Units (VALUs)**
-- **Vector Floating-Point Units (VFPUs)**
-- **Vector Instruction Permutation (VIPER)**
-- **Mask logic (VMSK)**
-- **Vector Load Store Unit (VLSU)**
+**SEW（Selected Element Width，选定元素位宽）**指定当前配置下的元素位数。RVV 1.0 已定义的编码对应 8、16、32 和 64 位，均为 2 的幂；更大位宽的编码处于保留状态，不能直接当作标准支持的配置使用。
 
-Many implementations support multiple concurrent loads/stores to hide memory latency and sustain bandwidth.
+**VLEN（Vector Register Length，向量寄存器长度）**定义单个体系结构向量寄存器的位数。它由具体实现选定，在同一硬件线程（hart）中保持不变。常见实现可以采用 128、256、512 或 1024 位；本章以 512 位为贯穿示例。
 
-The scalar side follows the standard RISC-V ISA with integer and floating-point support. The vector side provides a complete set of supports for integer, fixed point, floating-point, and conversion operations. Element widths span from 8 to 64 bits, and operations can occur between vector-vector, vector-scalar, or vector-immediate operands. Since the vector instructions are for many elements, the vector side also supports permutation and mask operations.
+**VLMAX（Maximum Vector Length，最大向量长度）**表示硬件容量，即当前向量寄存器组最多能够容纳的元素数，计算方式为 `VLEN/SEW`，再乘以 LMUL。
 
-The vector memory unit handles load/store operations in three fundamental patterns: unit-stride (contiguous elements), strided (constant offset between elements), and indexed (gather/scatter with per-element addresses). Segment load/store operations extend these patterns for structure-of-arrays data layouts.
+**LMUL**控制寄存器分组，让多个连续的体系结构向量寄存器共同承载一个逻辑操作数。它不改变 VLEN，却能扩大一条指令覆盖的有效向量长度。
 
-High-performance implementations can support multiple concurrent load/store operations from different memory types: cache, non-cached memory, and local vector memory. All read and write ports to the register file are typically centrally controlled, with data dependencies managed by a scoreboard.
+RVV 的一个关键点是：在当前配置下，元素编号空间由 VLEN、LMUL 和 SEW 共同确定。以 VLEN=512、LMUL=4、SEW=32 为例，VLMAX 为 `512/32×4=64` 个元素。若随后执行 EEW=8 的加载，指令仍按当前 VL 处理元素，但目的操作数实际占用的寄存器范围由 EEW 与有效 LMUL（EMUL）决定。
 
-### 3.3.1 The Coupling Challenge
+RVV 还提供加宽、扩展和窄化指令，在改变数据位宽的同时保持元素数量。单个操作数最多占用 8 个向量寄存器；若所需 EMUL 超过 8，编码便不合法。例如 LMUL=8 时，双倍加宽加法 `vwadd` 的目的 EMUL 为 16，超过上限。
 
-One important implementation consideration is the coupling between the vector processor and the scalar CPU. Decoupling them is surprisingly difficult because vector instructions frequently reference the integer register file—both for reading scalar operands and for computing memory addresses. In addition, the scalar CPU handles all the control and status registers (CSRs) including the vector CSRs. The CSR operation is often serialized instruction which can be a major degradation for performance. Some vector CSRs must be updated speculatively for performance. This tight integration requires careful coordination between the two domains. In practice, achieving clean decoupling requires substantial engineering effort and is not always the right design choice.
+> **译注：**不能把所有“位宽扩展”都理解为“LMUL 乘以扩展倍数”。`vsext.vf4` 的目的 EEW=SEW、目的 EMUL=LMUL，源 EEW=SEW/4、源 EMUL=LMUL/4；它与 `vwadd` 的参数关系不同。原文此处对扩展倍数和寄存器组上限的说明容易混淆，故改用加宽加法举例。
 
-Ideally, the memory regions for scalar and vector should be separated for optimal performance, but the hardware must check for any memory address dependency between the scalar and vector load/store operations. This is the complexity in implementation of the load store unit to ensure that memory data dependency is properly handled if it existed.
-
-The flip side of tight coupling is flexibility: the functional unit design can be highly modular. If workloads demand heavy floating-point MAC throughput, the floating-point MAC unit can be duplicated. Custom functional units or hardware accelerators can be added to the vector execution pipeline, extending capability without fundamental architectural changes.
-
-While functional units determine peak arithmetic throughput, the vector register file ultimately governs how quickly data can be delivered to these units. The next subsection examines this critical but often overlooked component in detail.
-
-### 3.3.2 Register File Banking, Ports, and Conflicts
-
-The previous section outlined how vector functional units interact with each other and with the scalar pipeline. We now turn to a deeper layer: the physical organization of the vector register file (VRF). While software presents 32 architectural registers of VLEN bits each, the hardware must carefully balance area, power, latency, and bandwidth. These implementation constraints directly influence how LMUL, widening, masking, and permutation instructions behave in practice.
-
-#### 3.3.2.1 Banking and Porting Basics
-
-A monolithic VLEN-bit multiported register file is impractical in area and power. Instead, vector processors distribute storage across multiple SRAM banks, each with a small number of read and write ports. This is achieved through:
-
-- **Banking:** Registers are divided among independent banks, either by bits (bit-slicing) or by register number (register-slicing).
-- **Time-multiplexing:** Reads and writes are scheduled across multiple pipeline phases to avoid exceeding the port limits of each bank.
-- **Pattern awareness:** Unit-stride and constant-stride loads and stores map predictably across banks, minimizing conflicts.
-
-From software's perspective, LMUL determines how many architectural registers form a logical vector group. From hardware's perspective, the logical vector group is broken into micro-ops where the micro-ops is limited to read or write of a single vector register, allowing the VRF to provide limited ports per cycle while still sustaining high throughput.
-
-Implementers often determine VRF port counts empirically by running application workloads and measuring when port conflicts limit throughput. Ports are then increased until these benchmarks achieve the desired performance. The application kernels often use vector group (LMUL greater than 1). This avoids over-provisioning while ensuring the VRF meets real-world performance requirements.
-
-Typical microarchitectures provide:
-
-- 2–3 read ports (two sources plus optional mask read from v0)
-- 1 write port
-- Optional auxiliary bandwidth for widening or for multiple functional units operating in parallel
-
-Because port count does not scale with LMUL, larger LMUL values are handled by splitting instructions into multiple micro-ops, each respecting the same fixed port budget.
-
-#### 3.3.2.2 LMUL, Widening, Narrowing, and Bandwidth Scaling
-
-LMUL determines how many physical registers are consumed per logical vector:
-
-- **LMUL=1:** Each source or destination operand of a micro-op accesses one register.
-- **LMUL>1:** Instructions expand into multiple micro-ops of LMUL=1 micro-op.
-- **Fractional LMUL:** Reduces the number of active elements, leaving space for widening while lowering VRF bandwidth pressure.
-
-Widening instructions (e.g., `vwadd`, `vwmul`, `vwsub`) produce results twice as wide as their inputs. Rather than doubling VRF ports, implementations:
-
-- Split widening results into two write cycles
-- Generate independent micro-ops for the low and high halves, or
-- Use a dedicated widening pipeline with buffered writeback
-
-Narrowing instructions (e.g., `vnsr`, `vnclip`, `vfncvt`) produce results half the width of their inputs:
-
-- Use a dedicated narrowing pipeline with buffer writeback
-
-This preserves timing closure and power efficiency while supporting mixed-precision patterns such as int8 → int16 or fp16 → fp32 or int16 → int8 or fp32 → fp16.
-
-As noted earlier, the number of elements per programming of LMUL and SEW should be the same for all vector instructions. Widening instructions, narrowing instructions, and fixed element-width vector load/store instructions effectively change the effective LMUL (ELMUL) or effective (ESEW). Widening instruction effectively changes the ELMUL to be 2× of LMUL, thus if LMUL=8, the widening instructions are illegal.
-
-#### 3.3.2.3 Indexed Accesses and Bank Conflicts
-
-Unit-stride loads and stores distribute accesses evenly across banks, allowing near-ideal bandwidth. Indexed patterns—gather and scatter—lack this regularity. Adjacent elements may request the same bank in the same cycle, forcing replays or serialization or multi-cycle operations.
-
-Common microarchitectural techniques include:
-
-- Bank interleaving to spread addresses across banks for many common strides, where multiple banks can be read at the same time
-- Replay queues that reissue conflicted accesses without stalling the pipeline
-- Lower peak throughput for indexed operations relative to unit-stride loads/stores
-- Strictly use unit vector loads and use of `vrgather`, `slideup`, `slidedown`, and `compress` to rearrange data *inside* the VRF
-- Similar to the VRF where the number vector register grouping is limited to 8, the number of cache lines per vector load/store instruction can also be limited
-
-In practice, compilers try to minimize irregular memory access. They often load data with unit-stride instructions and use vector permutes to achieve the required ordering.
-
-#### 3.3.2.4 Interaction with Chaining and Masking
-
-Chaining, discussed in Section 3.9, allows dependent vector operations to overlap when VRF ports are sufficient. This works only when the VRF can supply the required operands without exceeding port limits. When several functional units are active—such as fused multiply-add, widening, and reduction units—VRF read pressure increases. Chaining should be taken into account for important application kernels in setting the number of VRF read and write ports.
-
-Masking influences VRF efficiency:
-
-- **Agnostic policies (vma/vta)** allow masked-off elements to be ignored, eliminating unnecessary reads of "old" data.
-- **Undisturbed policies (vum/vtu)** may require reading the previous value to preserve inactive elements, increasing port usage.
-- Designs without register renaming often implement both policies identically for simplicity, but high-performance implementations using register renaming distinguish them microarchitecturally.
-
-Chaining thus depends on a balance of port availability, micro-op scheduling, and masking behavior. A well-designed VRF allows a continuous stream of dependent vector operations without stalling. With the physical constraints of the register file in mind, we now turn to the architectural controls that govern vector behavior: the Control and Status Registers (CSRs). These define how SEW, LMUL, VL, masking, and tail policies are communicated to the hardware.
+**VL（Vector Length，向量长度）**规定普通逐元素操作的索引上界，范围为 0～VLMAX。`vstart=0` 且不使用掩码时，它就是本次处理的元素数。软件向配置指令提供请求长度 AVL，硬件按规范选出实际 VL；这不是在所有情况下都简单取 `min(AVL, VLMAX)`，具体规则见 3.8.1 节。
 
 ---
 
-## 3.4 Control and Status Registers
+## 3.3 功能单元组织
 
-The vector extension introduces several Control and Status Registers (CSRs) that define how vector instructions execute. These fall into two groups: arithmetic CSRs, which manage saturation flags and rounding modes, and configuration CSRs, which set parameters such as VL and vtype. Correctly understanding their update timing and semantics is essential for both software correctness and hardware implementation.
+向量处理器同时包含标量和向量功能单元。标量部分按照标准 RV64 或 RV32 执行，向量部分通常包括：
 
-CSR manipulation governs how vector instructions interpret SEW, LMUL, masks, and other configuration settings. The two primary CSRs are:
+- **向量算术逻辑单元（Vector Arithmetic Logic Unit，VALU）；**
+- **向量浮点单元（Vector Floating-Point Unit，VFPU）；**
+- **向量置换单元（原文记为 Vector Instruction Permutation，VIPER）；**
+- **掩码逻辑（VMSK）；**
+- **向量加载/存储单元（Vector Load/Store Unit，VLSU）。**
 
-- **VL** — the active vector length
-- **vtype** — encodes SEW, LMUL, mask/tail policy
+许多实现允许多笔向量加载/存储并发在途，以隐藏内存延迟并维持带宽。
 
-Speculative CSR handling ensures that `vsetvl` instructions do not serialize the pipeline. The programmer should limit the use of `vsetvl` instructions to avoid serialization of instruction issuing.
+标量侧遵循标准 RISC-V ISA，支持整数和可选浮点功能。向量侧提供整数、定点、浮点和格式转换操作，元素宽度通常覆盖 8～64 位，操作数形式包括向量-向量、向量-标量和向量-立即数。由于一条向量指令面向多个元素，向量侧还必须支持置换和掩码操作。
 
-### 3.4.1 Arithmetic Control
+向量访存单元处理三种基本模式：
 
-Fixed-point saturation and floating-point rounding reuse scalar CSRs. The vector unit must integrate cleanly with the scalar FPU to ensure compatibility with existing RISC-V software ecosystems. Fixed-point operations use dedicated CSRs for saturation flags and rounding mode control. These can be implemented as separate registers or merged into a single register for convenience. For floating-point operations, the vector processor shares the standard floating-point CSR (`fcsr`) with the scalar FPU, including its flags and rounding mode settings. This sharing simplifies the programming model but requires careful implementation to avoid conflicts or creating artificial data dependencies.
+- 单位步长：元素在内存中连续排列；
+- 固定步长：相邻元素地址之间保持固定偏移；
+- 索引访问：每个元素使用独立索引地址，实现 gather/scatter。
 
-#### 3.4.1.1 CPU Ownership of Vector State
+分段加载/存储在这些模式上进一步支持结构化数据的交错字段访问。
 
-A key architectural principle is that the scalar CPU, not the VPU, owns all vector programmable state. The CPU computes and attaches the effective SEW, LMUL, VL, mask policy, and vstart to the vector instructions before they are executed in the VPU. Furthermore, the scalar CPU detects illegal vector instructions and takes traps such that the VPU receives only valid vector instructions.
+高性能实现可以同时向可缓存内存、非缓存内存和本地向量存储器发起多笔加载/存储请求。寄存器文件的读写端口通常由集中式逻辑仲裁，数据相关则交给记分牌跟踪。
 
-This design:
+### 3.3.1 标量核与向量单元的耦合挑战
 
-- Greatly simplifies VPU implementation
-- Avoids speculative state tracking inside the VPU
-- Ensures all instructions arrive with fully resolved vector states
-- Enables rapid development cycles because the complexity of vector states stays centralized in the CPU
+一个重要的实现问题，是如何处理向量单元与标量 CPU 之间的耦合。二者很难彻底分开：向量指令经常需要从整数寄存器文件取得标量操作数或访存基地址，向量 CSR 也往往由标量 CPU 统一管理。传统 CSR 操作通常带有串行化语义，若照搬到频繁变化的向量配置上，性能会明显下降，因此高性能实现可能需要推测跟踪部分向量状态。两个执行域必须精细协同；强行追求彻底解耦，不但工程代价很高，也未必最合适。
 
-By keeping the VPU "stateless" regarding configuration transitions, vector engines remain predictable, scalable, and easier to verify.
+为了获得较好性能，软件最好让标量访问与向量访问尽量落在不同内存区域；硬件仍须检查两类加载/存储之间的地址相关。访存单元的一项难点，就是在地址重叠时维持正确的内存顺序。
 
-The VPU performance, in most cases, determined by the vector load/store operations which should be executed speculatively based on the speculative vector states.
+紧密耦合的另一面是实现灵活性：功能单元可以高度模块化。如果工作负载需要大量浮点 MAC 吞吐率，可以复制浮点 MAC 单元；也可以把自定义功能单元或硬件加速器接入向量执行流水线，而无需从根本上改变架构。
 
-### 3.4.2 Vector Configuration (Speculative Handling)
+功能单元决定理论算术峰值，向量寄存器文件则决定数据能以多快速度送达这些单元。下一节详细讨论这一关键但经常被忽略的部件。
 
-The VL and vtype registers present a unique implementation challenge. In typical CSR implementations, writes are serializing events—the pipeline must drain before the new value takes effect. This approach would be catastrophically slow for vector code, where VL and vtype change frequently throughout execution.
+### 3.3.2 寄存器文件的存储体划分、端口与冲突
 
-The solution is speculative CSR handling. Speculative propagation ensures performance remains high even with frequent configuration changes. Vector instructions do not read from the committed CSR values; instead, they use speculative copies based on preceding `vsetvl` instructions. This allows VL and vtype updates to be treated as normal instructions rather than serializing barriers, maintaining pipeline efficiency. The hardware must track these speculative values through the pipeline and handle misprediction recovery, but the performance benefit justifies the complexity.
+前一节说明了向量功能单元之间以及它们与标量流水线之间的交互。现在进一步分析向量寄存器文件 VRF 的物理组织。软件看到的是 32 个、每个宽 VLEN 位的体系结构寄存器；硬件则必须在面积、功耗、延迟和带宽之间取得平衡。这些实现约束会直接影响 LMUL、加宽、掩码和置换指令的实际性能。
 
----
+#### 3.3.2.1 存储体与端口基础
 
-## 3.5 The vtype Register
+把整个向量寄存器文件做成一个单体、全宽的多端口结构，通常难以承受面积和功耗开销。实际设计往往把存储分散到多个存储体（bank）或通道切片，每个部分只提供少量读写端口。常见方法包括：
 
-The vtype register encodes the vector type configuration, including LMUL, SEW, and policies for handling masked and tail elements. This single register controls how the hardware interprets vector instructions, making it the most frequently referenced configuration state. RVV compresses this flexibility into a compact 3-bit LMUL encoding.
+- **分存储体：**按位、通道或寄存器编号切分，把数据映射到彼此独立的存储体；
+- **时间复用：**把读写请求安排到不同周期或流水级，避免超过单个存储体的端口上限；
+- **利用访问规律：**根据寄存器编号、元素位置和访问拍次的映射安排 VRF 读写，尽量减少冲突。
 
-**Figure 3-1. vtype Register Layout**
+从软件角度，LMUL 决定逻辑寄存器组的大小；从硬件角度，指令可以拆成多拍读写，每拍只访问其中一部分数据。因此，处理大寄存器组并不要求端口数按 LMUL 成倍增加。
 
-| Bits | Name | Description |
-|------|------|-------------|
-| XLEN-1 | vill | Illegal value if set |
-| XLEN-2:8 | 0 | Reserved (must be zero) |
-| 7 | vma | Vector mask agnostic |
-| 6 | vta | Vector tail agnostic |
-| 5:3 | vsew[2:0] | Selected element width (SEW) setting |
-| 2:0 | vlmul[2:0] | Vector register group multiplier (LMUL) setting |
+实现者通常会运行目标应用，观察端口冲突从何时开始限制吞吐率，再逐步增加端口，直到关键基准达到目标性能。应用内核常会使用 LMUL>1 的寄存器组；让端口数由真实负载驱动，既能避免过度配置，也能守住关键场景的性能。
 
-Layout of the vtype register showing the five fields that control vector instruction behavior. The vill bit (at position XLEN-1) signals an illegal configuration; vma and vta control the handling of masked and tail elements; vsew encodes the Selected element width; and vlmul encodes the register grouping multiplier. Bits XLEN-2 through 8 are reserved and should be written as zeros. This layout is for RV32; on RV64, vill remains at bit 63 with additional reserved bits.
+原文以如下端口配置说明设计思路：
 
-*Adapted from "RISC-V Vector Extension Specification, Version 1.0," Section 3.4, RISC-V International, licensed under CC-BY 4.0.*
+- 2～3 个读端口，用于两个源操作数以及可选的 `v0` 掩码读取；
+- 1 个写端口；
+- 为加宽操作或多个并行功能单元提供可选辅助带宽。
 
-### 3.5.1 LMUL Encoding
+这些不是 RVV 规定的端口数量。例如 FMA 还要读取累加操作数，掩码也可能使用独立路径；实际端口需求必须结合操作数、分存储体方式和调度策略计算。
 
-The vlmul field uses a 3-bit encoding to represent both integer and fractional multipliers. Vector register group multiplier (LMUL) encoding in the vlmul[2:0] field of vtype. Fractional values (1/8, 1/4, 1/2) reduce the effective vector length while preserving all 32 architectural register names; integer values (2, 4, 8) group adjacent registers to extend vector length at the cost of fewer addressable register groups.
+端口数量不会随 LMUL 成比例增长，因此较大的 LMUL 通过拆分成多个微操作来执行，每个微操作仍遵守同一固定端口预算。
 
-**Figure 3-2. vlmul Field Encoding**
+#### 3.3.2.2 LMUL、加宽、窄化与带宽伸缩
 
-| vlmul[2:0] | LMUL | VLMAX | # Registers |
-|------------|------|-------|-------------|
-| 101 | 1/8 | VLEN/(SEW×8) | 32 |
-| 110 | 1/4 | VLEN/(SEW×4) | 32 |
-| 111 | 1/2 | VLEN/(SEW×2) | 32 |
-| 000 | 1 | VLEN/SEW | 32 |
-| 001 | 2 | 2×VLEN/SEW | 16 |
-| 010 | 4 | 4×VLEN/SEW | 8 |
-| 011 | 8 | 8×VLEN/SEW | 4 |
+LMUL 决定普通同宽操作数的体系结构寄存器分组。若实现以单寄存器宽度拆分操作，可以这样理解：
 
-The encoding reveals an elegant design: fractional multipliers (1/8, 1/4, 1/2) use the upper bit patterns, while integer multipliers (1, 2, 4, 8) use the lower patterns. This allows a single 3-bit field to span a 64× range of effective vector lengths.
+- **LMUL=1：**微操作的每个源或目的操作数访问一个寄存器；
+- **LMUL>1：**一条指令展开为多个寄存器粒度的微操作；
+- **分数 LMUL：**减少活动寄存器区域，为后续加宽保留空间，同时降低 VRF 带宽压力。
 
-### 3.5.2 Tail and Mask Agnostic Policies
+微操作不一定与单个寄存器等宽；实际粒度由 DLEN、端口组织和指令类型决定。
 
-The vta (vector tail agnostic) and vma (vector mask agnostic) bits control what happens to elements that are either beyond VL (tail elements) or masked off. The vta and vma fields determine how inactive elements are produced. Out-of-order designs with register renaming benefit from "agnostic" policies. Designs without renaming often treat undisturbed and agnostic identically.
+`vwadd`、`vwmul`、`vwsub` 等加宽指令产生位宽为输入两倍的结果。实现通常不会简单地把 VRF 写端口翻倍，而会：
 
-The specification allows two policies: undisturbed (preserve previous values) or agnostic (implementation may write any value).
+- 把加宽结果拆成两个写回周期；
+- 为低半部和高半部分别生成微操作；或者
+- 使用带缓冲写回的专用加宽流水线。
 
-**Figure 3-3. vta/vma Policy Table**
+`vnsr`、`vnclip`、`vfncvt` 等窄化指令产生位宽为输入一半的结果，通常使用带缓冲写回的专用窄化流水线。
 
-| vta | vma | Tail Elements | Masked Elements |
-|-----|-----|---------------|-----------------|
-| 0 | 0 | Undisturbed | Undisturbed |
-| 0 | 1 | Undisturbed | Agnostic |
-| 1 | 0 | Agnostic | Undisturbed |
-| 1 | 1 | Agnostic | Agnostic |
+这些方案在支持 `int8→int16`、`fp16→fp32`、`int16→int8` 和 `fp32→fp16` 等混合精度模式时，仍能保持良好的时序和功耗效率。
 
-*Adapted from "RISC-V Vector Extension Specification, Version 1.0," Section 3.4, RISC-V International, licensed under CC-BY 4.0.*
+对这些逐元素操作而言，改变操作数位宽不会改变 VL 所规定的元素范围，而是改变各操作数的 EEW 和 EMUL。例如双倍加宽加法的目的 EMUL 是 LMUL 的两倍，所以 LMUL=8 时无法执行。归约、整寄存器传送等指令另有语义，不能套用“所有指令处理同样多元素”的概括。
 
-Tail and mask agnostic policy encoding. The vta bit (position 6) controls tail element handling; the vma bit (position 7) controls masked element handling. When set to 0 (undisturbed), inactive elements retain their previous values. When set to 1 (agnostic), the implementation may overwrite inactive elements with arbitrary values, enabling optimizations in register-renaming microarchitectures.
+#### 3.3.2.3 索引访问与存储体冲突
 
-The motivation for agnostic policies relates to out-of-order execution with register renaming. When a vector register is renamed, preserving tail or masked elements requires reading the old physical register and merging with new results. This read port adds significant area cost to the register file, particularly for wide vector registers.
+> **译注：**下面转向缓存或本地存储器的 bank 冲突。它与前面的 VRF bank 冲突属于不同层级：一个由内存地址决定，另一个由寄存器数据的物理映射决定。原文将二者连续讨论，这里补充区分。
 
-Some implementations have developed algorithms enabling out-of-order execution and completion without register renaming. In such designs, result data is always written back to the vector register file with masking—the undisturbed and agnostic policies produce identical results. This eliminates the area penalty while maintaining full specification compliance. The vta and vma bits have no effect on such implementations, which simplifies verification considerably.
+单位步长加载/存储通常能把访问均匀分散到各个存储体，获得接近理想的带宽。索引式聚集/分散访存不具备这种规则性，相邻元素可能在同一周期访问同一个存储体，从而需要重放、串行化或多周期处理。
 
-### 3.5.3 Illegal Instruction Detection
+常用微架构方法包括：
 
-The vill bit indicates when an illegal vtype configuration was attempted. If software requests an unsupported configuration—for example, SEW=128 on an implementation that only supports up to 64 bits—the vill bit is set and any subsequent vector instruction will trap. This provides a clean error-handling mechanism for software probing of hardware capabilities. vill ensures programs can probe hardware safely.
+- 交错组织存储体，使许多常见步长的地址分散到可并行访问的多个存储体；
+- 使用重放队列重新发射发生冲突的访问，而不阻塞整条流水线；
+- 接受索引访问的峰值吞吐率低于单位步长加载/存储；
+- 在数据位于可安全读取的连续区域、且语义等价时，使用单位步长加载，再通过 `vrgather`、`vslideup`、`vslidedown`、`vcompress` 在寄存器中重排；
+- 正如一个向量寄存器组最多包含 8 个寄存器，具体实现也可能限制单条向量访存内部同时处理的缓存行数量，以控制并发资源；这种内部限制不能改变 ISA 规定的最终可见结果。
 
----
+实际中，编译器会尽量减少不规则内存访问，常先用单位步长指令加载，再通过向量置换得到所需顺序。
 
-## 3.6 Register Grouping with LMUL
+#### 3.3.2.4 与链式执行和掩码的相互作用
 
-The LMUL mechanism is one of the most powerful features of the RISC-V Vector Extension. It lets software trade register count for vector length by grouping architectural registers, adapting the register file organization to workload requirements without changing hardware width.
+第 3.9 节将介绍，若 VRF 端口足够，链式执行可以让存在依赖的向量操作重叠运行。只有 VRF 能在不超过端口限制的前提下提供全部操作数，这种重叠才成立。当 FMA、加宽和归约等多个功能单元同时工作时，VRF 读压力会增加。因此，在为关键应用内核确定 VRF 读写端口数量时，必须把链式执行纳入考虑。
 
-![LMUL Register Grouping](fig3-4-lmul-register-grouping.png)
+掩码策略也会影响 VRF 效率：
 
-**Figure 3-4. LMUL Register Grouping**
+- **不关心策略（`vma`/`vta`）**允许忽略被掩码关闭或处于尾部的目的元素，避免读取旧数据；
+- **保持策略（`mu`/`tu`）**可能需要读取旧目的值以保留非活动元素，增加端口占用；
+- 不使用寄存器重命名的设计为了简化实现，可以让保持与不关心策略产生相同的“保持旧值”结果；采用重命名的高性能实现则会在微架构上区分两种策略。
 
-This figure shows LMUL register grouping. With LMUL=1, all 32 vector registers are individually addressable. As LMUL increases, adjacent registers are grouped: LMUL=2 creates 16 double-width groups, LMUL=4 creates 8 quad-width groups, and LMUL=8 creates 4 octa-width groups. Instructions must use aligned register numbers (divisible by the LMUL value).
-
-- **LMUL=1:** 32 vector registers, each VLEN bits wide. With VLEN=512, each register holds 64×8‑bit, 32×16‑bit, 16×32‑bit, or 8×64‑bit elements.
-- **LMUL=2:** Adjacent register pairs form 16 logical registers of 1024 bits. The physical register width remains 512 bits; only addressing changes. Instructions must use even register numbers (v0, v2, ...); odd numbers are illegal.
-- **LMUL=4:** 8 logical registers of 2048 bits, divisible‑by‑4 numbering.
-- **LMUL=8:** 4 logical registers of 4096 bits, divisible‑by‑8 numbering. With VLEN=512, a single instruction can span 512 8‑bit elements, covering the full logical vector capacity.
-
-### 3.6.1 Fractional LMUL
-
-Fractional values reserve space for widening and enable mixed-precision arithmetic patterns. Fractional LMUL values (1/2, 1/4, 1/8) serve a different purpose: they reserve register space for widening operations. When LMUL equals 1/2, only half of each register is considered valid—the upper half is effectively reserved.
-
-![Fractional LMUL](fig3-5-fractional-lmul.png)
-
-**Figure 3-5. Fractional LMUL**
-
-The primary use case is type widening. Consider loading 8-bit data with LMUL=1/4, producing 16 valid elements in the lower quarter of the register. A 4× sign-extension to 32 bits will expand those 16 elements to fill an entire register with LMUL=1. The element count stays constant (16 elements) while the data type widens.
-
-This pattern enables efficient mixed-precision computation. Load narrow data, perform widening operations, compute at full precision, then narrow the results back down—all while keeping element counts consistent and avoiding register pressure issues.
+因此，链式执行能否顺畅，取决于端口供给、微操作调度和掩码行为能否彼此匹配。设计得当的 VRF 可以让相关向量操作连续流动而不必停顿。理解这些物理约束后，下面转向控制向量行为的体系结构状态，也就是向硬件描述 SEW、LMUL、VL 以及掩码和尾部策略的 CSR。
 
 ---
 
-## 3.7 Vector Masking
+## 3.4 控制与状态寄存器
 
-Vector masking provides per-element predication, allowing selective updates to vector registers. The mask is stored in vector register v0, with one bit controlling each element. A mask bit of 1 means the element is active (unmasked) and will be updated; a mask bit of 0 means the element is inactive (masked) and will be handled according to the vma policy. Masking uses v0 for per-element predication. The number of mask bits equals VLMAX, determined by SEW × LMUL.
+向量扩展引入了若干控制与状态寄存器，用于定义向量指令的执行方式。它们可分为两组：管理饱和标志和舍入模式的算术 CSR，以及设置 VL、`vtype` 等参数的配置 CSR。正确理解这些寄存器的更新时序和语义，对软件正确性与硬件实现都很重要。
 
-![v0 Vector Mask Register](fig3-6-v0-mask-register.png)
+CSR 决定向量指令如何解释 SEW、LMUL、掩码等配置。两个主要 CSR 是：
 
-**Figure 3-6. v0 Vector Mask Register Layout**
+- **`vl`：**当前向量长度，与 `vstart` 和掩码共同限定活动元素；
+- **`vtype`：**编码 SEW、LMUL 以及掩码/尾部策略。
 
-![Mask Bit Mapping in v0](fig3-7-mask-bit-mapping.png)
+对 CSR 状态进行推测跟踪，可以避免 `vsetvl` 指令把流水线串行化。即便如此，软件也应避免无必要地频繁执行 `vsetvl`，减少配置依赖和发射限制。
 
-**Figure 3-7. Mask Bit Mapping in Vector Register v0**
+### 3.4.1 算术控制
 
-*Adapted from "RISC-V Vector Extension Specification, Version 1.0," Section 3.4, RISC-V International, licensed under CC-BY 4.0.*
+定点饱和与浮点舍入需要和标量侧 CSR 协同。为了兼容现有 RISC-V 软件生态，向量单元还必须正确接入标量浮点状态。定点向量操作通过专用 CSR 管理饱和标志和舍入模式；这些字段既可单独访问，也可通过组合 CSR 访问。浮点向量操作则与标量 FPU 共享标准的 `fcsr` 状态，包括异常标志和舍入模式。共享状态简化了编程模型，却要求硬件妥善处理访问冲突，避免引入不必要的伪相关。
 
-Mask bit mapping in vector register v0. Each bit in v0 controls whether the corresponding element is active (bit=1) or inactive (bit=0). The number of meaningful mask bits equals VLEN/SEW × LMUL. For a 512-bit implementation: with SEW=8 and LMUL=1, 64 mask bits control 64 elements; with SEW=64 and LMUL=1, only 8 mask bits are meaningful. Mask bits are always packed starting from bit 0 of v0, regardless of SEW.
+#### 3.4.1.1 由 CPU 管理向量状态
 
-The number of mask bits required depends on the maximum number of elements. With LMUL=8 and SEW=8, VLMAX reaches 512 elements on a 512-bit implementation, requiring all 512 bits of v0 for masking. With LMUL=1 and SEW=64, only 8 elements exist, so only 8 mask bits are meaningful.
+在我采用的实现中，可编程向量状态由标量 CPU 统一管理，VPU 不再重复跟踪配置的变化。向量指令进入 VPU 前，CPU 已解析其有效元素位宽、寄存器分组、VL、掩码策略和 `vstart`，并完成相应的合法性检查，再把这些信息随指令一起传递。
 
-Masking is controlled by bit 25 of vector instructions. When this bit is 0, the instruction uses v0 as a mask. When the bit is 1, the instruction is unmasked—all elements from 0 to VL-1 are updated regardless of v0's contents. This encoding keeps the common unmasked case efficient while providing full predication capability when needed.
+> **译注：**这是作者采用的 CPU/VPU 分工，不是 RVV ISA 的强制要求。配置和编码合法，也不代表后续执行不会发生异常；例如加载仍可能遇到页故障，需要 VPU 与 CPU 协同处理。
 
----
+这种设计：
 
-## 3.8 Vector Length Control
+- 大幅简化 VPU；
+- 避免在 VPU 内部跟踪推测配置状态；
+- 保证每条指令到达时，向量状态都已经完全解析；
+- 把向量状态复杂度集中在 CPU，缩短开发和验证周期。
 
-While LMUL and SEW determine the maximum vector length, the VL register controls how many elements actually participate in each operation thus enabling natural tail handling without scalar cleanup loops. This separation between capacity (VLMAX) and usage (VL) is fundamental to efficient vector programming.
+VPU 不负责配置状态的转换后，执行引擎会更可预测、更易扩展，也更容易验证。
 
-Consider processing an array of 21 elements when VLMAX is 32. Setting VL to 21 causes vector operations to process only elements 0 through 20. Elements 21 through 31 are tail elements—they're not updated (or updated to arbitrary values, depending on the vta policy). This eliminates the need for cleanup loops or explicit masking for non-power-of-two data sizes. In implementation, the tail elements 21 through 31 are treated as inactive mask bits using the same mask logic as with the vector masking bits.
+在许多负载中，VPU 的性能首先受向量访存限制。要维持吞吐率，访存操作也必须尽早取得相应的推测向量状态并开始执行。
 
-### 3.8.1 The vsetvl Instructions
+### 3.4.2 向量配置的推测处理
 
-All vector configuration—SEW, LMUL, VL—is controlled through `vsetvli`, `vsetvl`, and `vsetivli`. VL and vtype are updated together by the vsetvl family of instructions. This atomic update is critical—changing SEW or LMUL changes VLMAX, which may require VL adjustment. Updating them together prevents transient illegal states.
+`vl` 和 `vtype` 给实现带来特殊挑战。传统 CSR 写入往往是串行化事件，流水线必须先排空，新值才能生效。向量代码会频繁改变 `vl` 和 `vtype`，如果每次都串行化，性能将严重下降。
 
-The `vsetvli` instruction uses immediate values for vtype configuration. The assembler syntax is clear: "e8" means SEW=8, "m4" means LMUL=4, "mf4" means LMUL=1/4. The destination register receives the actual VL value, which may be clamped to VLMAX if the requested length exceeds capacity. Tail elements beyond VL behave according to vta (undisturbed or agnostic).
-
-- `{m1}`, `m2`, `m4`, `m8`, `mf2`, `mf4`, `mf8` — setting the LMUL, default is m1 if m value is not specified
-- `e8`, `e16`, `e32`, `e64` — setting the SEW size
-- `{tu}`, `ta` — setting tail elements, default is tu if ta is not specified
-- `{mu}`, `ma` — setting masked-off elements, default is mu if ma is not specified
-
-![Vector Configuration Instruction Formats](fig3-8-vsetvl-formats.png)
-
-**Figure 3-8. Vector Configuration Instruction Formats (vsetvli, vsetivli, vsetvl)**
-
-*Adapted from "RISC-V Vector Extension Specification, Version 1.0," Section 3.4, RISC-V International, licensed under CC-BY 4.0.*
-
-Instruction formats for the vsetvl family. The `vsetvli` instruction (top) encodes vtype fields directly as immediates, supporting the common case of static configuration. The `vsetivli` instruction (middle) additionally encodes AVL as a 5-bit unsigned immediate for small, constant vector lengths. The `vsetvl` instruction (bottom) reads both AVL and vtype from registers, enabling fully dynamic configuration. All three write the resulting VL to rd and update the vtype CSR.
-
-Several special cases merit attention. When both rd and rs1 are x0, VL is unchanged—useful for changing vtype without disturbing the current vector length. When rs1 is x0 but rd is not, VL is set to VLMAX—a common pattern when processing full vectors.
-
-- `rd=rs1=x0` — no update for csr.vl
-- `rd!=x0, rs1=x0` — vl=VLMAX, x[rd]=vl
-- `rs1!=x0` — vl=x[rs1], x[rd]=vl
-- `x[rs1] > VLMAX` — vl=VLMAX, x[rd]=vl
-
-### 3.8.2 Strip Mining and First-Fault Loads
-
-Strip mining divides large memory ranges into VL-sized chunks. RVV enhances this pattern through first-fault loads:
-
-- The hardware loads elements sequentially
-- If an element crosses a page boundary, the first-fault load:
-  1. Loads all valid elements before the fault
-  2. Automatically adjusts VL to the valid count
-  3. Treats the fault as *benign*
-  4. Allows downstream vector instructions to continue normally
-
-This eliminates the need to compute trip counts for boundary-sensitive loops. The CPU can issue repeated loads of size VL, and the hardware determines the final short iteration automatically. The VL provides the most flexible number of vector elements for any application.
+一种解决办法是推测跟踪 CSR。后续向量指令不必等 `vsetvl` 提交后再读取正式 CSR，而是使用由前序配置指令推导出的重命名或推测副本。这样，`vl` 和 `vtype` 的更新可以像普通指令一样流过流水线，不再天然成为串行化屏障。代价是硬件必须跟踪这些版本，并在错误路径被清除时恢复正确状态。
 
 ---
 
-## 3.9 Chaining: The Performance Multiplier
+## 3.5 `vtype` 寄存器
 
-Chaining is the key technique that allows vector processors to sustain high throughput even when instructions have data dependencies. Instead of waiting for results to be written back to the vector register file (VRF) and then re-read, dependent operations can forward intermediate results directly between functional-unit pipelines. This overlap shortens latency and keeps execution pipelines busy. While chaining works at any LMUL setting, its benefits are most pronounced with LMUL > 1, where instructions decompose into multiple micro-ops that can overlap.
+`vtype` 编码向量类型配置，包括 LMUL、SEW，以及被掩码关闭元素和尾部元素的处理策略。它决定硬件如何解释后续向量指令，是最常引用的配置状态之一。RVV 用紧凑的 3 位 `vlmul` 字段表达从分数到整数的 LMUL。
 
-### 3.9.1 How Chaining Works
+**图 3-1　`vtype` 寄存器布局**
 
-**Forwarding principle:** Results produced by one functional unit (e.g., multiply) are passed directly to another (e.g., add) without detouring through the VRF. In more practical view, for a kernel loop of N instructions, the last vector instruction should produce 1 vector register result every clock cycle. For example, for LMUL=8, then the last vector instruction should write to 8 vector registers in 8 consecutive cycles. Chaining is the performance, power, and area (PPA) efficiency in comparison to other architecture. From our point-of-view, RVV is the most valuable architecture of RISC-V. Without chaining, a vector processor should be relabeled as SIMD processor.
+| 位 | 名称 | 含义 |
+|---|---|---|
+| `XLEN-1` | `vill` | 置 1 表示非法配置 |
+| `XLEN-2:8` | 0 | 保留，必须为 0 |
+| 7 | `vma` | 掩码元素不关心策略 |
+| 6 | `vta` | 尾部元素不关心策略 |
+| `5:3` | `vsew[2:0]` | SEW 编码 |
+| `2:0` | `vlmul[2:0]` | LMUL 编码 |
 
-**Micro-op granularity:** With LMUL > 1, vector instructions are decomposed into multiple micro-ops. Chaining allows these micro-ops to overlap, nearly doubling throughput on dependent sequences.
+`vill` 位位于 `XLEN-1`，表示非法配置；`vma` 和 `vta` 控制掩码元素和尾部元素的处理；`vsew` 编码选定元素位宽；`vlmul` 编码寄存器组倍增系数。`XLEN-2:8` 为保留位，应写 0。在 RV64 中，`vill` 位于 bit 63，其下有相应的更多保留位。
 
-**Example:** A vector fused multiply-add (FMA) can begin as soon as its source vector is produced by a preceding load or add, rather than stalling for register writeback.
+*改编自《RISC-V Vector Extension Specification, Version 1.0》第 3.4 节，RISC-V International，CC BY 4.0。*
 
-### 3.9.2 Efficiency Factors
+### 3.5.1 LMUL 编码
 
-Chaining performance depends on several microarchitectural conditions:
+`vlmul[2:0]` 用 3 位同时表示整数和分数倍增系数。分数值 1/8、1/4、1/2 减小有效寄存器占用，同时保留全部 32 个体系结构寄存器名称；整数值 2、4、8 把相邻寄存器分组，以减少可寻址寄存器组数量为代价扩大有效向量长度。
 
-- **VRF port availability:** Enough read/write ports must exist to sustain overlapping operations.
-- **Pipeline depth:** Longer pipelines benefit more from chaining, since forwarding hides latency.
-- **Masking and memory modes:** Masked operations or irregular memory accesses can increase VRF pressure and reduce chaining efficiency.
-- **Bypass paths:** Hardware datapaths must support direct forwarding between functional units.
+**图 3-2　`vlmul` 字段编码**
 
-### 3.9.3 Impact of LMUL
+| `vlmul[2:0]` | LMUL | VLMAX | 寄存器组数量 |
+|---|---:|---:|---:|
+| `101` | 1/8 | VLEN/(SEW×8) | 32 |
+| `110` | 1/4 | VLEN/(SEW×4) | 32 |
+| `111` | 1/2 | VLEN/(SEW×2) | 32 |
+| `000` | 1 | VLEN/SEW | 32 |
+| `001` | 2 | 2×VLEN/SEW | 16 |
+| `010` | 4 | 4×VLEN/SEW | 8 |
+| `011` | 8 | 8×VLEN/SEW | 4 |
 
-**LMUL=1:** Each vector instruction executes as a single micro-op, limiting overlap opportunities. Chaining still applies but provides less benefit than with larger LMUL values, where multiple micro-ops per instruction enable deeper pipelining. This single-micro-op behavior resembles traditional SIMD execution, though RVV retains its variable-length semantics even at LMUL=1.
+这套编码用一个 3 位字段同时覆盖分数和整数 LMUL，使最小与最大有效寄存器组宽度相差 64 倍。
 
-**LMUL > 1:** Instructions expand into multiple micro-ops, and chaining allows them to overlap. For example, with LMUL=8 on a 64-element-per-cycle design, a vector add becomes 8 micro-ops. Chaining ensures these micro-ops can overlap rather than serialize.
+### 3.5.2 尾部与掩码不关心策略
 
-### 3.9.4 Commit-Point Streaming
+`vta`（vector tail agnostic）和 `vma`（vector mask agnostic）决定 VL 之外的尾部元素以及被掩码关闭的元素如何处理。规范允许两类策略：
 
-Some terminologies for instruction execution:
+- 保持（undisturbed）：保留旧目的值；
+- 不关心（agnostic）：对于普通数据目的元素，实现可以保留旧值，也可以写成全 1；软件不得依赖其中的具体值。
 
-- **Complete:** an instruction execution is done and the result is written back to a register where the register can be a temporary or architectural register.
-- **Commit:** an instruction is no longer speculative and cannot be cancelled. As long as all the earlier branch instructions are executed without misprediction, then the instruction can be committed.
-- **Retire:** when the result data of an instruction is written into an architectural register. Effectively, retiring also means that a temporary register can be renamed as an architectural register.
+> **译注：**原文的“任意值”不够准确，普通 agnostic 数据元素并非允许任意位模式。掩码目的寄存器的尾部则始终按 tail-agnostic 处理，且允许写入规范规定的额外结果，不能机械套用下表的普通数据元素规则。
 
-There are 2 possibilities:
+**图 3-3　`vta`/`vma` 策略表**
 
-1. An instruction can be completed, then committed and retired at the same time. This option is speculative execution of instructions.
-2. An instruction can be committed, then completed and retired at the same time. This option is non-speculative execution of instructions.
+| `vta` | `vma` | 尾部元素 | 被掩码关闭的元素 |
+|---:|---:|---|---|
+| 0 | 0 | 保持 | 保持 |
+| 0 | 1 | 保持 | 不关心 |
+| 1 | 0 | 不关心 | 保持 |
+| 1 | 1 | 不关心 | 不关心 |
 
-In both cases, the instructions can still be out-of-order execution for performance. High-performance RVV implementations often treat the vector unit as a decoupled backend:
+*改编自《RISC-V Vector Extension Specification, Version 1.0》第 3.4 节，RISC-V International，CC BY 4.0。*
 
-- **Committing:** Vector instructions committed by reorder-buffer (ROB) and invalidated in the ROB.
-- **Large instruction windows:** The CPU can commit many more vector instructions than the ROB can hold, enabling deep vector instruction queues.
-- **Non speculation:** Because instructions are committed before VPU execution, vector instructions can write result data directly into the vector register file.
+引入不关心策略的主要动机与带寄存器重命名的乱序执行有关。向量寄存器被重命名后，如果必须保留尾部或被屏蔽元素，实现就要读取旧物理寄存器并与新结果合并。对宽向量寄存器而言，这个额外读端口会带来显著面积成本。
 
----
+有些实现不依赖寄存器重命名，也能支持乱序执行和完成。在这类设计中，结果始终带写掩码写回原 VRF，因此“保持”和“不关心”都可以实现为保留旧值，仍然符合规范。这样可以消除额外面积代价，并显著简化验证；在此类微架构中，`vta` 和 `vma` 不必改变实际写回数据。
 
-## 3.10 Element Width Manipulation
+### 3.5.3 非法配置检测
 
-Precision flexibility is essential for domains such as machine learning and signal processing. RVV supports widening, narrowing, and mixed-precision arithmetic operations, enabling efficient acceleration of workloads that require both high throughput and dynamic precision scaling. These instructions impose non-uniform access patterns on the VRF, and their performance depends on:
-
-- LMUL configuration
-- VRF banking structures
-- Port availability
-- Execution unit width
-
-A common pattern in vector programming involves loading data at one width and computing at another. The interaction between `vsetvli`, load instructions, and conversion instructions requires careful coordination. Consider loading 16 8‑bit values and expanding them to 32 bits for computation. One approach: set `vsetvli` with SEW=8 and LMUL=1/4, establishing 16 elements. The `vle8` instruction loads 16 bytes into the lower quarter of v8. Then change `vsetvli` to SEW=32 and LMUL=1—still 16 elements, but now 32‑bit each. A sign‑extension instruction expands v8 into the full 64‑byte result. This demonstrates how RVV enables seamless widening: narrow data is loaded efficiently, then expanded for full-precision computation without altering the element count.
-
-The key insight is that the element count stays constant through the conversion. When the ratio SEW/LMUL is held constant, VLMAX remains fixed regardless of element width. This allows 8-bit data (LMUL=1/2) to occupy half a register, 16-bit data (LMUL=1) to fill one register, 32-bit data (LMUL=2) to span two registers, and 64-bit data (LMUL=4) to span four registers—all while processing exactly the same number of elements per instruction. This property is essential for mixed-precision loops: widening and narrowing operations can proceed without changing VL or adding strip-mining overhead.
-
-![Mixed-Precision Vector Loop](fig3-9-mixed-precision-loop.png)
-
-**Figure 3-9. Mixed-Precision Vector Loop with Constant Element Count**
-
-The code demonstrates that mixed-precision execution can proceed without changing VL. The next question is where those elements actually live. Figure 3-10 answers this by showing how elements of different widths occupy the vector register file as LMUL scales, clarifying the register-level implications of the SEW/LMUL relationship.
-
-![Mixed-Width Operations with Constant SEW/LMUL Ratio](fig3-10-mixed-width-operations.png)
-
-**Figure 3-10. Mixed-Width Operations with Constant SEW/LMUL Ratio**
-
-When the ratio SEW/LMUL is held constant (here, 16), VLMAX remains fixed regardless of element width. This example shows 8 elements at four different widths: 8-bit elements with LMUL=1/2 occupy half a register; 16-bit elements with LMUL=1 fill one register; 32-bit elements with LMUL=2 span two registers (v0–v1); and 64-bit elements with LMUL=4 span four registers (v0–v3). This property enables seamless widening and narrowing operations without changing VL or restructuring loops.
-
-### 3.10.1 DLEN vs. VLEN: Datapath Width Beyond Architectural Register Width
-
-While VLEN defines architectural storage, many implementations decouple this from execution width.
-
-Some implementations distinguish between:
-
-- **VLEN** — architectural register width
-- **DLEN** — datapath (execution engine) width
-
-When DLEN > VLEN, the datapath can process more bits per cycle than the register file holds, enabling:
-
-- Faster accumulation
-- Wider dot-product units
-- Improved mixed-precision throughput
-
-This separation allows implementers to scale arithmetic capabilities without enlarging the vector register file. It is especially powerful for designs targeting AI/ML workloads where accumulation precision often exceeds input precision. In a way, DLEN > VLEN is the loop unrolling done in hardware to improve the performance without increasing the number of read/write ports of the VRF.
-
-An alternative approach sets `vsetvli` with SEW=32 from the start. The `vle8` instruction still loads 16 8-bit elements because VL determines element count, not the memory element width. This is an important subtlety: `vle8`, `vle16`, `vle32` all process the same number of elements; they differ only in how many bytes each element occupies in memory.
-
-In version 0.8 of the specification, load-with-extension was a single instruction (`vlb` for sign-extended byte load). Later versions split this into separate load and extend operations, adding flexibility at the cost of an extra instruction. For implementations based on version 0.8, this combined instruction can be retained as a custom extension.
+`vill` 表示软件尝试设置了不受支持的 `vtype`。例如请求保留的 SEW 编码时，通常会置位 `vill`，同时把 `vtype` 其余位和 `vl` 清零；后续依赖 `vtype` 的向量指令会触发非法指令异常。配置指令等不依赖该状态的指令不受同样限制，软件可以据此探测能力或重新建立合法配置。规范也允许在不支持的配置写入时直接陷入，以便进行软件模拟。
 
 ---
 
-## 3.11 Vector Memory Instructions
+## 3.6 使用 LMUL 进行寄存器分组
 
-Loads and stores may be:
+LMUL 是 RISC-V 向量扩展中很有代表性的一项机制。软件可以把多个连续的体系结构寄存器组成一个逻辑操作数，以较少的可用寄存器组换取更大的有效向量长度，从而在不改变 VLEN 的前提下调整寄存器组织。
 
-- **Unit-stride**
-- **Strided**
-- **Indexed**
+![LMUL 寄存器分组](images/fig3-4-lmul-register-grouping.png)
 
-Each has different VRF and memory bandwidth implications.
+**图 3-4　LMUL 寄存器分组**
 
-First-fault behavior, as described in §3.8.2, applies only to loads, not stores.
+LMUL=1 时，32 个向量寄存器都可以独立寻址。随着 LMUL 增大，相邻寄存器组成一组：LMUL=2 得到 16 个双宽组，LMUL=4 得到 8 个四倍宽组，LMUL=8 得到 4 个八倍宽组。以下以普通同宽操作数为例；混合位宽操作数需要按各自的 EMUL 判断对齐。
 
-Note that base addresses always come from scalar registers, reinforcing the architectural coupling between scalar and vector pipelines.
+- **LMUL=1：**32 个向量寄存器，每个宽 VLEN 位。VLEN=512 时，每个寄存器可以容纳 64 个 8 位、32 个 16 位、16 个 32 位或 8 个 64 位元素；
+- **LMUL=2：**相邻寄存器两两组成 16 个 1024 位逻辑组。单个体系结构寄存器仍宽 512 位，只是按组使用。起始编号必须为偶数，如 `v0`、`v2` 等；
+- **LMUL=4：**8 个 2048 位逻辑寄存器，起始编号必须能被 4 整除；
+- **LMUL=8：**4 个 4096 位逻辑寄存器，起始编号必须能被 8 整除。VLEN=512、SEW=8 时，一条指令最多可跨 512 个 8 位元素。
 
----
+### 3.6.1 分数 LMUL
 
-## 3.12 System-Level Behavior and Privilege Interactions
+分数 LMUL 值 1/2、1/4、1/8 具有不同用途：它们减少单个操作数的有效寄存器占用，为加宽和混合精度运算保留空间。例如 LMUL=1/2 时，只使用每个寄存器的低半部分作为当前有效寄存器区域，其余部分按尾部区域处理。
 
-RVV integrates cleanly into the RISC-V privilege model. Vector registers are preserved across traps, supervisor transitions, and context switches subject to OS policy.
+![分数 LMUL](images/fig3-5-fractional-lmul.png)
 
-Vector-enabled OS kernels often:
+**图 3-5　分数 LMUL**
 
-- Save/restore vector state lazily
-- Defer allocation until first vector use
-- Manage vstart carefully during preemption
+典型应用是类型加宽。例如在 VLEN=512、VL=16 时，以 SEW=8、LMUL=1/4 加载 16 个字节；再把配置改为 SEW=32、LMUL=1，执行 4 倍符号扩展，结果便占满一个寄存器。数据类型变宽，但元素数量仍为 16。源、目的寄存器的选择还须满足重叠约束，具体示例见 3.10 节。
 
-This reduces context-switch overhead for scalar-only processes.
-
----
-
-## 3.13 The vstart Register and Exception Handling
-
-Integer vector operations include add, subtract, shift, compare, and boolean logic. Saturating arithmetic relies on shared scalar CSRs for rounding and overflow behavior. The vstart register supports precise exception handling for vector operations. It indicates the index of the element that caused a trap, allowing software to fix the problem and resume execution from that point.
-
-Consider a vector load processing 32 elements. If the fourth element causes a page fault, vstart is set to 3 (zero-indexed), and the trap handler is invoked. After resolving the fault, execution resumes with the same load instruction, but now it processes only elements 3 through 31—elements 0 through 2 have already completed.
-
-The specification restricts which instructions can set vstart to non-zero values. Only load and store instructions can trap mid-execution; compute instructions take interrupts only at instruction boundaries. If vstart is non-zero when a compute instruction executes, an illegal instruction exception is raised. This restriction simplifies implementation while matching typical use cases—memory operations are far more likely to encounter mid-instruction faults than arithmetic operations.
-
-After any vector instruction completes normally, vstart is reset to zero. vstart is set for a single instruction and should be used in only the vector load store unit. This ensures clean state for subsequent instructions and prevents stale values from causing incorrect behavior.
+这种模式适合混合精度计算：加载窄数据，扩展后以完整精度计算，再把结果窄化，而元素数量保持一致，也不会引发不必要的寄存器压力。
 
 ---
 
-## 3.14 Determining Valid Elements
+## 3.7 向量掩码
 
-Bringing together the concepts of vstart, VL, and masking, we can now define precisely which elements are valid for a vector operation. An element is processed if its index is greater than or equal to vstart, less than VL, and either unmasked or the instruction ignores the mask. Elements outside this range are either tail elements (index >= VL) or prestart elements (index < vstart), and they're handled according to the agnostic policies.
+向量掩码提供逐元素谓词执行，使指令能够选择性更新向量寄存器。用于屏蔽执行的掩码操作数存放在 `v0` 中；对 `vstart≤i<VL` 范围内的元素，每一位控制一个元素：
 
-![Element Classification by Index](fig3-11-element-classification.png)
+- 掩码位为 1：元素活动，即未被屏蔽，将参与更新；
+- 掩码位为 0：元素不活动，即被屏蔽，按照 `vma` 策略处理。
 
-**Figure 3-11. Element Classification: Prestart, Body, and Tail Regions**
+有意义的掩码位数等于当前 VLMAX，由 VLEN、SEW 和 LMUL 共同决定。
 
-*Adapted from "RISC-V Vector Extension Specification, Version 1.0," Section 4.4, RISC-V International, licensed under CC-BY 4.0.*
+![v0 向量掩码寄存器](images/fig3-6-v0-mask-register.png)
 
-Classification of vector elements by index. Elements with index < vstart are prestart elements and are never modified. Elements with vstart ≤ index < VL form the body; within the body, elements are active if unmasked (or if the instruction ignores masks) and inactive if masked off. Elements with index ≥ VL are tail elements. Prestart elements are always preserved; tail and inactive elements follow the vta and vma policies respectively.
+**图 3-6　`v0` 向量掩码寄存器布局**
 
-This three-way intersection of vstart, VL, and mask provides complete control over which elements participate in computation. Software can express arbitrary patterns of active and inactive elements, while hardware implementations can optimize for common cases (vstart=0, VL=VLMAX, no mask) without sacrificing generality.
+![v0 中的掩码位映射](images/fig3-7-mask-bit-mapping.png)
+
+**图 3-7　向量寄存器 `v0` 中的掩码位映射**
+
+*改编自《RISC-V Vector Extension Specification, Version 1.0》的“Mask Register Layout”节，RISC-V International，CC BY 4.0。*
+
+`v0` 中每一位决定对应元素是否活动。掩码位始终从 `v0` 的 bit 0 开始连续打包，与 SEW 无关。例如 VLEN=512、LMUL=1 时：
+
+- SEW=8，VLMAX=64，需要 64 个有效掩码位；
+- SEW=64，VLMAX=8，只有 8 个掩码位有意义。
+
+当 LMUL=8、SEW=8 时，512 位实现的 VLMAX 达到 512，需要使用 `v0` 的全部 512 位。相反，LMUL=1、SEW=64 时只需要 8 位。
+
+向量指令编码的 bit 25，即 `vm` 位，控制是否启用掩码：
+
+- `vm=0`：使用 `v0` 作为掩码；
+- `vm=1`：不使用掩码，`vstart≤i<VL` 范围内的全部元素参与操作，不考虑 `v0` 内容。
+
+这种编码让常见的非掩码形式保持高效，同时在需要时提供完整的逐元素谓词能力。
 
 ---
 
-## 3.15 The vlenb Register
+## 3.8 向量长度控制
 
-The vlenb register contains VLEN divided by 8, providing a read-only mechanism for software to discover the implementation's vector register width. This is a design-time constant—it cannot be modified at runtime. Software uses this value to calculate VLMAX and to make decisions about loop unrolling and data layout.
+LMUL 和 SEW 决定最大向量长度 VLMAX，`vl` 则设置当前操作的元素范围上界。下面先按 `vstart=0`、无掩码讨论。容量 VLMAX 与本次使用量 VL 相分离，使程序能够直接处理最后一批不足整向量的数据，而不必另写标量收尾循环。
+
+例如 VLMAX=32，要处理一个包含 21 个元素的数组，可以设置 VL=21。向量操作只处理元素 0～20，元素 21～31 属于尾部元素；它们保持旧值或允许变为不关心值，取决于 `vta`。这样，无论数据规模是否为 2 的幂，都不需要额外清理循环或显式尾部掩码。实现中，尾部元素可以复用与向量掩码类似的非活动元素控制逻辑。
+
+### 3.8.1 `vsetvl` 指令族
+
+SEW、LMUL 和 VL 等向量配置由 `vsetvli`、`vsetvl` 和 `vsetivli` 控制。`vsetvl` 指令族会原子地更新 `vl` 和 `vtype`。这一点非常重要，因为改变 SEW 或 LMUL 会改变 VLMAX，也可能要求相应调整 VL；原子更新可以避免中间出现不一致状态。
+
+`vsetvli` 用立即数字段编码 `vtype`。汇编语法比较直观：
+
+- `e8`、`e16`、`e32`、`e64` 设置 SEW；
+- `m1`、`m2`、`m4`、`m8`、`mf2`、`mf4`、`mf8` 设置 LMUL；
+- `tu` 或 `ta` 设置尾部保持/不关心策略；
+- `mu` 或 `ma` 设置被掩码关闭元素的保持/不关心策略。
+
+目的整数寄存器接收实际设置的 VL，而不是简单回写软件请求的 AVL。后续普通数据指令的尾部元素按 `vta` 处理。
+
+![向量配置指令格式](images/fig3-8-vsetvl-formats.png)
+
+**图 3-8　向量配置指令格式：`vsetvli`、`vsetivli` 和 `vsetvl`**
+
+*改编自《RISC-V Vector Extension Specification, Version 1.0》的“Configuration-Setting Instructions”节，RISC-V International，CC BY 4.0。*
+
+`vsetvli` 直接用立即数编码 `vtype` 字段，适合配置静态已知的常见情况；`vsetivli` 还用 5 位无符号立即数编码 AVL（application vector length），适合较小的常量长度；`vsetvl` 从寄存器读取 AVL 和 `vtype`，支持完全动态配置。三者都把最终 VL 写入 `rd`，并更新 `vtype` CSR。
+
+对于合法、受支持的 `vtype`，VL 的选择规则如下：
+
+| 请求长度 AVL | 实际 VL |
+|---|---|
+| `AVL ≤ VLMAX` | `VL = AVL` |
+| `VLMAX < AVL < 2×VLMAX` | `ceil(AVL/2) ≤ VL ≤ VLMAX` |
+| `AVL ≥ 2×VLMAX` | `VL = VLMAX` |
+
+同一实现对相同 AVL、VLMAX 必须给出确定的结果。例如 VLMAX=16、AVL=23 时，可以先处理 16 个、再处理 7 个，也可以先处理 12 个、再处理 11 个。后一种选择让最后两轮的工作量更均衡。软件必须使用指令实际返回的 VL 来更新指针和剩余计数。
+
+`vsetvli` 和 `vsetvl` 还通过寄存器字段表达几种特殊情况：
+
+- `rs1!=x0`：以 `x[rs1]` 为 AVL，按上表选择 VL；`rd=x0` 时仅丢弃整数寄存器写回，仍更新 `vl`；
+- `rs1=x0, rd!=x0`：以最大无符号整数为 AVL，得到 `vl=VLMAX`，并写入 `x[rd]`；
+- `rs1=rd=x0`：以当前 `vl` 为 AVL，用于保持 VL、改变 `vtype`。此形式要求新旧 VLMAX 不变，旧 `vtype` 也须合法；会改变 VLMAX 的用法属于保留用法，不能仅以“旧 VL 还能装下”为判断条件。
+
+这些寄存器特例不适用于 `vsetivli` 的 AVL 字段，因为该字段编码的是 0～31 的立即数。
+
+> **译注：**原文将 VL 简化为 `min(AVL, VLMAX)`，并省略了保持 VL 形式的约束。此处依据 RVV 1.0 第 6.2、6.3 节补全。
+
+### 3.8.2 分段处理与仅首元素故障加载
+
+分段处理把大范围数据拆成多轮，每轮处理返回的 VL 个元素。对于字符串扫描这类无法预知安全读取边界的循环，RVV 还提供**仅首元素故障加载（fault-only-first load）**：
+
+- 若索引为 0 的元素发生同步异常，正常陷入异常处理程序，`vl` 不因此缩短；
+- 若索引为 `i>0` 的元素发生同步异常，不报告这次异常，而把 `vl` 缩短到 `i`；
+- 被掩码关闭的元素不访问内存，也不会产生相应的访存异常；
+- 软件读取加载后的 `vl`，按新的元素范围处理本轮数据。
+
+例如原 VL=16，索引 10 处发生页故障，则新 VL=10。这里的 10 是索引上界，不是“成功加载的活动元素个数”；若前面有被屏蔽的元素，二者并不相等。规范还允许实现在没有异常时缩短 VL，但在 `vstart=0`、原 VL>0 时至少要处理一个元素。
+
+> **译注：**fault-only-first 的“首元素”严格指索引 0，不是“第一个未被掩码屏蔽的元素”，也不是“只处理遇到的第一个故障”。它改变的是同步异常处理方式，不保证硬件必须逐元素串行加载；中断仍按规范的陷入机制处理。
 
 ---
 
-## 3.16 Summary
+## 3.9 链式执行：性能倍增器
 
-The RISC-V Vector Extension provides a flexible, scalable foundation for vector computation. The key concepts—VLEN, SEW, LMUL, VL, and masking—interact to give software precise control over vector operations while allowing diverse hardware implementations. The speculative handling of configuration state enables high-performance implementations without the serialization penalties that would otherwise make dynamic configuration impractical.
+即使指令之间存在数据依赖，链式执行也能让它们重叠运行：上游一产生一部分结果，下游便开始处理这一部分，不必等待整个向量完成。关键是缩小依赖等待的粒度。它在一条指令包含多个执行数据块时尤其有用；较大的 LMUL 往往会增加这类机会。
 
-Understanding these fundamentals is essential before diving into implementation details. Every design decision in a vector processor—pipeline depth, functional unit count, memory bandwidth, register file organization—must be evaluated against these architectural constraints. The elegance of the RISC-V Vector Extension lies not in any single feature, but in how these features compose to enable both simple implementations for embedded systems and high-performance designs for datacenter workloads.
+### 3.9.1 链式执行如何工作
 
-In the next chapter, we will examine vector memory operations in detail, exploring the load/store patterns that move data between memory and vector registers. The interaction between addressing modes, element widths, and LMUL presents unique challenges that distinguish vector memory systems from their scalar counterparts.
+**部分结果就绪即可使用：**一种实现方法是把乘法单元的结果直接前递给加法单元。对于由 N 条指令组成的计算内核，若各级吞吐匹配且不存在其他停顿，理想稳态是最后一条指令每周期产出一个数据块。以 LMUL=8、每拍处理单寄存器宽度的数据为例，最后一条指令可以连续 8 拍写回整个寄存器组。
+
+> **译注：**直接旁路是一种实现手段，不是 chaining 的定义。先把一部分结果写入 VRF，再允许消费者提前读取这一部分，同样可以实现链式执行。RVV 规范不强制要求某种旁路网络，也不强制实现 chaining。
+
+**微操作粒度：**LMUL>1 时，一条向量指令会拆成多个微操作。链式执行让相关指令的这些微操作彼此重叠，可以显著提高依赖指令序列的吞吐率。
+
+**示例：**前序加载或加法一产生源向量的第一批数据，向量 FMA 就可以开始，而不必等待完整向量写回寄存器。
+
+### 3.9.2 效率影响因素
+
+链式执行性能取决于多项微架构条件：
+
+- **VRF 端口可用性：**必须有足够读写端口支撑重叠操作；
+- **流水线延迟与吞吐率：**首批结果的等待时间、各级接收新数据的频率，都会影响整条指令链；
+- **掩码与访存模式：**掩码操作和不规则访存可能增加 VRF 压力，降低链式执行效率；
+- **部分结果传递路径：**旁路或 VRF 必须支持消费者在整个向量完成前取得已就绪的数据。
+
+### 3.9.3 LMUL 的影响
+
+**LMUL=1：**如果内部执行宽度与 VLEN 相同，普通同宽指令可能只形成一个寄存器宽度的数据块，此时没有多个块在同一条依赖链上持续重叠的机会。仍可通过旁路和指令间流水获得收益，但这不同于长向量的分块链式执行。RVV 的可变 VL 等体系结构语义并不因此改变。
+
+**LMUL>1：**指令展开为多个微操作，链式执行可以让这些微操作跨相关指令重叠。例如 LMUL=8 时，一条向量加法可拆成 8 个寄存器粒度微操作；链式执行让后续指令在前几个微操作完成后就开始，而不是等 8 个全部串行结束。
+
+### 3.9.4 提交点之后的流式执行
+
+先说明本节沿用的几个术语。不同微架构文献有时会把 commit 与 retire 合并使用，下面的区分特指原文讨论的执行组织：
+
+- **完成（complete）：**指令结束执行，结果已经产生并进入临时存储或体系结构寄存器；
+- **提交（commit）：**指令不再处于推测状态，不能再被取消；此前可能影响它的分支和异常条件均已确定；
+- **退休（retire）：**指令结果成为体系结构状态，例如写入体系结构寄存器。在采用重命名的实现中，也可理解为对应物理寄存器映射正式成为体系结构映射。
+
+执行顺序有两种典型组织：
+
+1. 指令先完成，随后提交并退休。这对应提交前进行推测执行；
+2. 指令先提交，随后才执行完成并写入体系结构状态。这对应 VPU 侧的非推测执行。
+
+两种组织都可以配合乱序调度。高性能 RVV 实现还可以把向量单元设计成解耦后端：
+
+- **先提交：**向量指令在 CPU 的 ROB 中达到提交点后从 ROB 移除，再进入或继续留在更深的向量队列；
+- **扩大有效指令窗口：**CPU 已提交的向量指令数可以超过 ROB 同时容纳的数量，由深向量指令队列吸收；
+- **VPU 非推测执行：**因为进入实际 VPU 执行的指令已经提交，结果可以直接写入体系结构 VRF，无需为分支回滚保留完整向量结果。
+
+> **译注：**这里的“先提交”应理解为作者设计中的非推测派发点，不能直接等同于整条指令已经完成体系结构退休。指令离开 CPU 的 ROB，并不会消除它随后发生访存异常的可能性。若实现要支持精确陷入，仍须维护异常顺序、阻止不允许的年轻指令状态更新，并在需要时用 `vstart` 恢复；深队列本身不能替代这些机制。
+
+---
+
+## 3.10 元素位宽变换
+
+机器学习和信号处理等领域高度依赖精度灵活性。RVV 支持加宽、窄化和混合精度算术，可高效加速既要求高吞吐又需要动态精度变化的工作负载。这些指令会对 VRF 产生不均匀访问，其性能取决于：
+
+- LMUL 配置；
+- VRF 的存储体组织；
+- 端口可用性；
+- 执行单元宽度。
+
+向量编程中的常见模式，是以一种位宽加载数据，再以另一种位宽计算。`vsetvli`、加载指令和转换指令必须正确配合。以下假设 VLEN=512，加载 16 个 8 位值，再扩展为 32 位计算：
+
+1. 设置 SEW=8、LMUL=1/4，建立 16 个元素的配置；
+2. 用 `vle8` 把 16 个字节加载到 `v8` 的低四分之一区域；
+3. 改为 SEW=32、LMUL=1，元素数仍为 16，但每个元素宽 32 位；
+4. 执行 `vsext.vf4 v9, v8`，把 `v8` 中的窄元素扩展到 `v9`，得到 16 个 32 位结果。
+
+> **译注：**此时源 EMUL=1/4、目的 EMUL=1。由于源 EMUL 小于 1，这种扩展不允许源、目的寄存器重叠，因此示例使用不同的 `v8` 和 `v9`。图示中的布局变化用于说明容量关系，不代表可以任意原地扩展。
+
+窄数据先被紧凑加载，再扩展到完整计算精度，整个过程不改变元素数量。
+
+关键在于：转换前后保持 SEW/LMUL 比值不变时，VLMAX 也保持不变。于是可以让：
+
+- 8 位数据、LMUL=1/2，占半个寄存器；
+- 16 位数据、LMUL=1，占一个寄存器；
+- 32 位数据、LMUL=2，占两个寄存器；
+- 64 位数据、LMUL=4，占四个寄存器。
+
+四种配置每条指令都处理完全相同数量的元素。这对混合精度循环至关重要：加宽和窄化无需改变 VL，也不增加新的分段处理开销。
+
+![混合精度向量循环](images/fig3-9-mixed-precision-loop.png)
+
+**图 3-9　保持元素数量不变的混合精度向量循环**
+
+代码说明混合精度执行可以在不改变 VL 的情况下进行。图 3-10 进一步展示 LMUL 随元素位宽变化时，这些元素在向量寄存器文件中的实际位置。
+
+![保持 SEW/LMUL 比值不变的混合位宽操作](images/fig3-10-mixed-width-operations.png)
+
+**图 3-10　保持 SEW/LMUL 比值不变的混合位宽操作**
+
+当 SEW/LMUL 固定为 16 时，元素位宽变化不会改变 VLMAX。图中 8 个元素分别采用四种位宽：8 位、LMUL=1/2 时占半个寄存器；16 位、LMUL=1 时占一个寄存器；32 位、LMUL=2 时跨 `v0`～`v1`；64 位、LMUL=4 时跨 `v0`～`v3`。因此，加宽和窄化操作可以无缝进行，而无需改变 VL 或重构循环。
+
+### 3.10.1 DLEN 与 VLEN：体系结构寄存器宽度之外的数据通路
+
+VLEN 定义体系结构存储宽度，许多实现会把它与实际执行宽度解耦：
+
+- **VLEN：**体系结构向量寄存器宽度；
+- **DLEN：**内部数据通路或执行引擎宽度。
+
+当 DLEN>VLEN 时，数据通路每周期可以处理比单个寄存器更多的位，从而支持：
+
+- 更快的累加；
+- 更宽的点积单元；
+- 更高的混合精度吞吐率。
+
+这种分离让实现者无需扩大体系结构向量寄存器文件，就能扩展算术能力。对 AI/ML 设计尤其有用，因为累加精度经常高于输入精度。从一种实现视角看，DLEN>VLEN 相当于在硬件内部展开循环，在不按比例增加 VRF 体系结构寄存器数量的情况下提高吞吐率；但实际端口和存储体需求仍取决于具体数据组织。
+
+另一种编程方法，是从一开始就用 `vsetvli` 设置 SEW=32。`vle8` 仍会加载 VL 个 8 位内存元素，因为元素数量由 VL 决定，而不是由内存元素宽度决定。`vle8`、`vle16` 和 `vle32` 都处理 VL 个元素，区别在于每个内存元素的字节数，以及目的操作数由 EEW 推导出的 EMUL。需要特别注意：RVV 1.0 的普通 `vle8` 只把 8 位元素紧凑写入目的寄存器，不会自动把它们扩展到 32 位；若后续计算需要 32 位元素，还要执行 `vsext.vf4` 或 `vzext.vf4`，并遵守源、目的寄存器的重叠约束。
+
+在 0.8 版规范中，带扩展的加载可以由一条指令完成，例如 `vlb` 加载字节并进行符号扩展。后续版本把加载与扩展拆成独立操作，以增加灵活性，代价是多一条指令。基于 0.8 版构建的实现，也可以把组合操作保留为自定义扩展。
+
+---
+
+## 3.11 向量访存指令
+
+向量加载/存储可以采用：
+
+- **单位步长访问；**
+- **固定步长访问；**
+- **索引访问。**
+
+不同模式对 VRF 和内存带宽的影响不同。
+
+第 3.8.2 节介绍的 fault-only-first 行为只适用于加载，不适用于存储。
+
+还要注意，向量访存的基地址始终来自标量整数寄存器，这再次体现了标量流水线与向量流水线在架构上的耦合。
+
+---
+
+## 3.12 系统级行为与特权态交互
+
+RVV 能够自然融入 RISC-V 特权架构。向量寄存器状态在 trap、特权级切换和上下文切换中的保存方式由操作系统策略管理。
+
+操作系统可以根据安全性、调度开销和实现条件选择不同策略，例如：
+
+- 延迟保存和恢复向量状态；
+- 直到进程第一次使用向量指令时，才为其分配或启用相应状态；
+- 在抢占时谨慎处理 `vstart`。
+
+按需启用或延迟保存可以减少只执行标量代码的进程的额外开销，但并非所有系统都采用这些策略，RVV 也不强制要求“惰性”上下文切换。无论采用哪种策略，都必须正确维护进程可见的向量状态。
+
+---
+
+## 3.13 `vstart` 寄存器与异常处理
+
+`vstart` 用于支持向量指令的可恢复执行。它记录下一次执行应从哪个元素索引开始，使软件能够在处理异常后从相应位置恢复。
+
+例如，一条向量加载正在处理 32 个元素，第 4 个元素，即索引 3，引发页故障。硬件把 `vstart` 设置为 3，并进入 trap handler。故障解除后重新执行同一条加载指令，执行从元素 3 继续；元素 0～2 已经完成，无需重复产生体系结构效果。
+
+不同向量指令对非零 `vstart` 的支持受规范约束。访存指令可能在元素执行中途遇到同步异常，因此是 `vstart` 的主要使用者；许多计算指令只在指令边界接受中断，具体实现也可能只支持有限的非零 `vstart` 值。对不支持的 `vstart` 值，规范允许实现触发非法指令异常。这样的限制可以简化硬件，并符合常见使用场景，因为内存操作远比算术操作更容易在指令中途遇到故障。
+
+任何向量指令正常完成后，`vstart` 都复位为 0。这保证后续指令从干净状态开始，避免旧值造成错误行为。
+
+---
+
+## 3.14 判断哪些元素有效
+
+对普通逐元素指令，把 `vstart`、VL 和掩码结合起来，就能判断哪些元素实际参与执行。活动元素需要同时满足：
+
+- 元素索引不小于 `vstart`；
+- 元素索引小于 VL；
+- 指令为非掩码形式，或者对应掩码位为 1。
+
+索引小于 `vstart` 的元素称为 prestart 元素；索引不小于 VL 的元素称为尾部元素；主体范围内被掩码关闭的元素则是不活动元素。三类元素分别按照规范定义的保持或策略规则处理。
+
+![按索引划分向量元素](images/fig3-11-element-classification.png)
+
+**图 3-11　元素分类：prestart、主体与尾部区域**
+
+*改编自《RISC-V Vector Extension Specification, Version 1.0》的“Prestart, Active, Inactive, Body, and Tail Element Definitions”节，RISC-V International，CC BY 4.0。*
+
+- 索引 `<vstart` 的 prestart 元素永远不被修改；
+- `vstart≤索引<VL` 的元素构成主体，其中非掩码元素或掩码位为 1 的元素处于活动状态，被掩码关闭的元素处于不活动状态；
+- 索引 `≥VL` 的元素属于尾部；
+- 尾部元素与主体中的不活动元素分别遵循 `vta` 和 `vma` 策略。
+
+如果 `vstart≥VL`，普通向量指令不更新目的元素，包括尾部元素。这也是不能只看 `vta` 就决定是否改写尾部的原因。归约、掩码结果、整寄存器操作等另有规定，应按具体指令判断。
+
+`vstart`、VL 与掩码共同界定本条指令真正参与计算的元素。硬件可以为 `vstart=0`、`VL=VLMAX`、无掩码等常见情形设置快速路径，同时仍保留完整的一般语义。
+
+---
+
+## 3.15 `vlenb` 寄存器
+
+`vlenb` 保存 `VLEN/8`，即单个向量寄存器包含的字节数。它是只读常量，软件可用它发现当前实现的向量寄存器宽度，运行时不能修改。
+
+软件可以结合 `vlenb` 与当前 SEW、LMUL 计算容量，也可以据此决定循环展开和数据布局。不过可移植向量循环通常优先通过 `vsetvl*` 取得实际 VL，而不是直接假设某个 VLEN。
+
+---
+
+## 3.16 小结
+
+RISC-V 向量扩展为向量计算提供了灵活、可伸缩的基础。VLEN、SEW、LMUL、VL 和掩码相互配合，使软件能够精确控制向量操作，同时允许硬件采用多种不同实现。对配置状态进行推测处理，则使高性能实现能够避免频繁动态配置造成的串行化损失。
+
+在继续研究实现细节前，必须掌握这些基础。向量处理器中的每项设计决策，包括流水线深度、功能单元数量、内存带宽和寄存器文件组织，都需要在这些体系结构约束下评估。
+
+RISC-V 向量扩展的优雅之处不只在某一个功能，而在于这些机制可以组合起来：既能构建适合嵌入式系统的简单实现，也能构建面向数据中心工作负载的高性能设计。
+
+下一章将系统介绍 RVV 指令，先分析数据如何通过各种加载/存储模式在内存与向量寄存器之间移动，再讨论计算、掩码和置换操作。寻址方式、元素位宽与 LMUL 的相互作用，是向量存储系统区别于标量存储系统的重要挑战。
+
+
+---
+
+## 支持原作与反馈
+
+*译者附记*
+
+**如果这篇内容对你有帮助，欢迎访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并向原作者分享你的阅读反馈。** 这是作者在授权交流中特别提出的期待，也是支持这份教程继续完善的一种方式。
+
+反馈不必很长：哪一章最有帮助、哪个概念仍不清楚、希望增加哪些算例，都值得告诉作者。作者不阅读中文，建议使用简短英文，并注明来自 *RISC-V Vector Primer* 中文译本。
+
+中文翻译的用词、错漏或排版问题，请在译文评论区或中文译稿仓库反馈，由译者跟进；不要将译文中的问题视为原作者已经审定的内容。

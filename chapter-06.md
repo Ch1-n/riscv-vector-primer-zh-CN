@@ -1,147 +1,221 @@
-# Chapter 6: From Vectors to Matrices: The Architectural Path to the RISC-V Matrix Extension
+# 第 6 章：从向量到矩阵：RISC-V 矩阵扩展的架构思路
+
+> 本文是 *RISC-V Vector Primer* 的非官方中文译文，经原作者邮件许可，用于非商业技术教育。
+>
+> 原作者：Thang Minh Tran、Paul Miller；编辑：Jonah McLeod；出版方：Simplex Micro。中文翻译：Ch'in。
+>
+> [英文原作](https://github.com/simplex-micro/riscv-vector-primer) · 依据版本：`fc66957a6458842beeabe9d85065ff334ccbd333`（2026-07-25）。授权摘要及译注原则见[翻译说明](TRANSLATION-NOTICE.md)。原作者未审校中文译文。
+>
+> **支持原作：**作者特别欢迎中文读者访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并分享阅读反馈与改进建议。文末附有反馈说明。
 
 ---
 
-## 1. RVV Solved the Portability Problem
+## 1. RVV 解决了可移植性问题
 
-The RISC-V Vector Extension (RVV) was designed to address a long-standing challenge in parallel computing: how to express data-parallel programs in a way that remains portable across implementations with vastly different hardware capabilities. By decoupling software from fixed vector widths, RVV allows the same binary to execute correctly on processors with different vector lengths, register file sizes, and microarchitectural organizations.
+RISC-V 向量扩展试图回答并行计算领域一个由来已久的问题：怎样描述数据并行程序，才能让同一份软件在硬件能力差异很大的处理器上继续正确运行？
 
-Key architectural features—such as explicit vector length (VL), element width (SEW), and register grouping (LMUL)—enable software to scale across generations without recompilation. This approach preserves software investment while allowing hardware designers to innovate freely. As a result, RVV succeeds where earlier fixed-width SIMD and vector ISAs struggled: it provides a stable, forward-looking programming model for general data-parallel computation.
+RVV 不把程序绑定到某个固定向量宽度。同一份向量长度无关的二进制代码，可以在 VLEN 和微架构不同、但支持所需扩展的处理器上正确执行。软件通过 VL、SEW 和 LMUL 选择每轮处理的元素范围及组织方式，无须为每种硬件宽度重新编译。已有软件因而能用得更久，硬件设计者也有空间调整实现。
 
-Importantly, RVV does not target a single application domain. It supports irregular control flow, mixed data types, and boundary-heavy loops just as naturally as dense numeric kernels. In doing so, RVV establishes itself as a general-purpose vector architecture rather than a narrow accelerator interface.
+这解决了定宽 SIMD 的一个主要局限：循环结构不再直接依赖某个固定指令宽度，数据并行程序更容易跨硬件代际复用。
 
-Dense linear algebra kernels, such as matrix multiply-accumulate, can be implemented correctly and portably using vector loads, vector arithmetic, reductions, and strip-mining techniques. As these correctly expressed matrix kernels grow in size and intensity, the structural cost of mapping two-dimensional computation onto a one-dimensional vector abstraction begins to surface.
+更重要的是，RVV 并不只面向某一种应用。除了密集数值内核，它也提供掩码、不同元素类型和灵活访存等机制，用来处理带有条件选择、混合数据类型或大量边界情况的循环。它是一套通用向量架构，而不是只服务于某个算法的专用加速器接口。
 
-![Evolution from vector-packed matrices to native tile registers](fig6-1-vector-to-matrix-tiles.png)
+矩阵乘累加等稠密线性代数内核，同样可以用向量加载、算术、归约和分段处理来实现。但当计算越来越密集，用一系列一维向量操作组织二维矩阵计算所需的指令和数据管理，也逐渐成为值得关注的开销。
 
-**Figure 6-1.** Evolution from vector-packed matrices to native tile registers.
+![从向量寄存器中的矩阵分片到矩阵块寄存器](images/fig6-1-vector-to-matrix-tiles.png)
 
-RVV forces 2D matrices into 1D vectors, creating layout overhead and heavy register pressure, while matrix-extension tiles provide true 2D storage and single-instruction tile operations that eliminate per-element work.
+**图 6-1　从向量寄存器中的矩阵分片到矩阵块寄存器**
 
-The figure shows the software burden created when 2D matrices are forced into 1D vector registers. Stage 1 illustrates the RVV method: a 4×4 matrix is split across four vector registers (v0–v3), requiring manual layout handling and offering no native row×column operations. Stage 2 highlights the scaling issue: storing matrices A, B, and C for larger problems consumes 24 of 32 registers, causing heavy register pressure, spilling, and high instruction overhead. Stage 3 shows the matrix-extension solution, where tile registers (m0, m1) provide true 2D representation, enabling single-instruction tile operations and hardware-managed data reuse—cutting work from per-element instruction sequences to one instruction per tile.
+使用 RVV 时，软件把矩阵组织为若干向量片段，并管理布局与寄存器分配；图中的矩阵方案则直接提供二维矩阵块（tile）及整块操作，以减少逐片处理的指令开销。
 
----
+图中分为三个阶段：
 
-## 2. Matrix Workloads Exposed a Structural Mismatch, Not a Failure
+1. RVV 把一个 4×4 矩阵分布到 `v0`～`v3`，布局由软件维护，指令本身并不直接表达行与列之间的二维关系；
+2. 问题规模扩大后，同时保存 A、B、C 的数据可能占用 32 个向量寄存器中的 24 个，造成较大寄存器压力，甚至需要把数据溢出到内存；
+3. 图中矩阵方案使用 `m0`、`m1` 等矩阵块寄存器保存二维数据，通过整块计算和更深的数据复用，把逐元素或逐向量片的长指令序列压缩为少量矩阵块操作。
 
-As RVV has been applied to modern workloads—particularly in artificial intelligence and machine learning—it has proven fully capable of expressing matrix-dominated computation. Mapping inherently two-dimensional matrix structure onto a one-dimensional vector abstraction introduces costs that grow rapidly as problem sizes scale.
-
-![Register Grouping: LMUL vs Matrix Tiles](fig6-2-lmul-vs-matrix-tiles.png)
-
-**Figure 6-2.** Register Grouping: LMUL vs Matrix Tiles.
-
-The figure shows the comparison of software-managed vector grouping versus hardware-managed matrix tiles. LMUL-based vector groups require manual allocation and element-wise operations, while matrix tile registers provide native 2D structure, implicit data reuse, and full-tile compute in a single instruction.
-
-This software-managed grouping is the root of a second structural cost: every slice of a logical matrix tile must be loaded, multiplied, reduced, and advanced through explicit vector instructions. Because RVV exposes only one-dimensional structure, the compiler and programmer must reconstruct two-dimensional behavior through repeated vector-width operations. As problem sizes grow, this reconstruction manifests as rising instruction overhead, which the next figure illustrates.
-
-![Instruction Overhead: Vector vs Matrix Operations](fig6-3-instruction-overhead.png)
-
-**Figure 6-3.** Instruction Overhead: Vector vs Matrix Operations
-
-The figure box on the left shows how vector implementation incurs high instruction overhead. Each inner-loop pass requires 7+ instructions (load A, load B, multiply, reduce, two pointer updates, and a branch), repeated M × N × (K/VLEN) times. For a 256×256 GEMM with VLEN=32, this produces on the order of several million instructions. The dense row of gray boxes illustrates this large instruction stream that must be fetched, decoded, and executed. Right: The Matrix approach replaces this with just four tile-level instructions per output tile, shown as widely spaced green boxes, highlighting the dramatic reduction in instruction count.
-
-This instruction expansion is not an artifact of any particular implementation, but a direct consequence of expressing two-dimensional computation through repeated one-dimensional vector slices. As workloads grow, the underlying structure of matrix kernels amplifies these effects, revealing deeper pressures in the vectorized formulation.
-
-The box on the right shows how the Matrix approach achieves extremely low instruction overhead. Each output tile requires only four instructions—load A tile, load B tile, perform a fused matrix multiply-accumulate, and store the result. The total work scales with the number of tiles, (M/TM) × (N/TN) × (K/TK), rather than with every vector-width slice. In a 256×256 GEMM with 16×16 tiles, this yields just 4,096 tiles and 16,384 total instructions—over 200× fewer than the vector implementation. The widely spaced green boxes visually emphasize how each instruction performs an entire tile's worth of computation, in contrast to the dense instruction stream required by the vector approach. At some point, the physical implementation of the matrix approach would be too large for implementation.
-
-However, these workloads also reveal structural pressures that are not unique to RISC-V. Matrix kernels are characterized by extremely high arithmetic intensity, deep reuse of operands, and long inner loops with regular access patterns. When expressed purely as vector code, these properties can lead to increased instruction overhead, significant register pressure, and repeated movement of data that is conceptually part of a single logical tile.
-
-### 2.1 Matrix Execution Reflects a Physical Two-Dimensional Compute Structure
-
-Although the Matrix Extension presents tiles as architectural registers, these tiles correspond directly to a physical two-dimensional compute structure in hardware. Matrix execution is implemented by an array of multiply-accumulate processing elements (PEs) arranged in a fixed geometry. Each PE performs a simple operation—multiplying one element from matrix A with one element from matrix B and accumulating the result—while the array as a whole computes a full tile product through coordinated data movement and local accumulation.
-
-This execution model differs fundamentally from vector execution. In a vector unit, elements stream through lanes and are typically consumed once per instruction. In a matrix array, operands remain resident and are reused across many cycles as they propagate across the two-dimensional array, while partial sums remain local to the PEs until the tile computation completes. This spatial reuse is the defining efficiency advantage of matrix execution.
-
-When a tile is loaded, its contents remain resident across many internal multiply-accumulate operations, allowing memory access and instruction overhead to be amortized over a large amount of computation. As a result, matrix tile registers have a fundamentally different lifetime and reuse model than vector registers. A vector register typically participates in a small number of operations before being overwritten or advanced, whereas a matrix tile may participate in dozens or hundreds of internal MAC operations before being written back to memory. This distinction allows matrix instructions to collapse deeply nested inner loops into a single architectural operation.
-
-![Vector vs. Matrix Tile Lifetime and Reuse](fig6-4-vector-matrix-lifetime.png)
-
-**Figure 6-4.** Vector vs. matrix tile lifetime and reuse.
-
-Vector operands follow a single-use pattern—load, compute, store, discard—with no persistence across iterations. As shown in the figure, matrix tiles remain resident in the accumulator across many operations, amortizing load overhead.
-
-A matrix multiply kernel naturally decomposes into a tiled loop nest. Each iteration operates on a block of matrix A spanning the M and K dimensions, a block of matrix B spanning the K and N dimensions, and a block of matrix C that accumulates results across the M and N dimensions. For clarity, the extents of these blocks may be described as TM, TK, and TN, respectively. A matrix instruction operates on exactly one such tile at a time.
-
-Consequently, tile geometry directly determines the blocking strategy used by software and compilers, the amount of data reuse achievable per load, the ratio of computation to memory traffic, and the number of instructions required per output element. Tiles that are too small increase instruction and load/store overhead, while tiles that are too large increase hardware complexity, area, and timing pressure. Effective matrix architectures therefore select tile sizes that balance compute density with practical implementation constraints.
-
-Tile size also sets the fundamental performance ceiling of a matrix implementation. Larger tiles increase the ratio of computation to memory traffic and allow more reuse per load, but they require more PEs, more local storage, and longer interconnect paths. Smaller tiles reduce hardware cost and improve timing closure but increase instruction count and memory pressure. Each implementation therefore selects a tile geometry that maximizes sustained throughput within practical design limits, making tile size a first-order architectural parameter rather than a microarchitectural detail.
-
-Because matrix tiles are held locally during execution, the capacity of the tile register file determines how long operands and partial results can remain resident. Retaining accumulation tiles across the full K dimension avoids repeated loads and stores of partial sums, while retaining tiles of A or B across multiple operations enables operand-stationary or output-stationary execution styles. These behaviors are not software conventions layered on top of the architecture; they are direct consequences of the storage and reuse properties exposed by the hardware.
-
-Matrix arrays support different data-movement strategies depending on which operands remain resident. In an operand-stationary style, either A or B stays fixed in the array while the other operand streams through, maximizing reuse of one matrix. In an output-stationary style, the accumulation tile C remains resident, and partial sums are updated locally until the full tile is complete. These strategies are not software conventions but direct consequences of how data flows through the PE array, and they allow matrix instructions to amortize memory traffic across large amounts of computation.
-
-This tile-based execution model explains why matrix extensions coexist naturally with vector architectures. RVV remains responsible for control flow, data marshaling, layout transformation, and irregular computation, while matrix execution accelerates dense inner loops where computation is regular and reuse is high. By fixing tile geometry in hardware while leaving vector length scalable, the architecture preserves RVV's portability while enabling efficient execution of matrix-dominant workloads. As with vector length in RVV, the number and dimensions of matrix tiles are implementation-defined, allowing hardware designers to balance area, power, and performance while preserving a consistent programming model.
-
-This hardware organization is precisely what the Matrix Extension exposes architecturally: a tile-level abstraction that mirrors the underlying compute fabric while remaining compatible with RVV's scalable vector model.
-
-### 2.2 Software Responsibilities in a Tile-Accelerated Architecture
-
-While the Matrix Extension introduces a native abstraction for two-dimensional computation, software remains responsible for orchestrating the broader structure of matrix kernels. Tile-level execution does not eliminate the need for vector operations; instead, it shifts the division of labor between software and hardware. RVV continues to manage the outer structure of computation—loop control, pointer arithmetic, data marshaling, and layout transformation—while matrix instructions accelerate the dense inner loops where reuse is highest.
-
-Software determines how matrices are partitioned into tiles, how those tiles are scheduled, and how data is staged into and out of the tile register file. These responsibilities include selecting blocking factors that match the implementation's tile geometry, arranging memory layouts to maximize locality, and sequencing tile loads and stores to maintain a steady flow of operands to the compute array. Compilers and libraries must therefore reason about tile shapes, register-file capacity, and the reuse opportunities exposed by the hardware, just as they reason today about vector length and LMUL when targeting RVV.
-
-Because tile geometry is fixed in hardware, software adapts to the implementation rather than the other way around. This differs from RVV's scalable vector model, where software expresses computation in terms of abstract vector lengths and relies on the hardware to choose an appropriate VLEN. In the matrix case, software selects loop bounds and blocking strategies that align with the tile dimensions of the target machine. This approach preserves portability at the ISA level while allowing each implementation to choose tile sizes that balance area, power, and performance.
-
-Tile-accelerated execution also relies on software to coordinate data movement between the vector and matrix domains. RVV instructions prepare operands by loading, transposing, or packing data into layouts suitable for tile consumption, while matrix instructions perform the compute-dense portion of the kernel. After tile computation completes, RVV instructions handle post-processing, boundary conditions, and any irregular or non-tiled regions. This interplay ensures that the Matrix Extension enhances, rather than replaces, the vector programming model.
-
-In this way, software and hardware share responsibility for efficient matrix execution. The Matrix Extension provides a high-throughput compute substrate for regular, two-dimensional inner loops, while RVV supplies the flexibility needed to express the full structure of real workloads. Together, they form a unified programming environment in which tile-level specialization complements the generality of scalable vectors.
+> **译注：**本章沿用原作者“矩阵块寄存器 + 计算阵列”的设计视角，不是在介绍已经定稿的统一 RISC-V 矩阵规范。图中的寄存器名称、数量和布局都是示例；“占用 24 个寄存器”也不是任意矩阵乘法的固定需求。
 
 ---
 
-## 3. Vector Execution Made Matrix Behavior Explicit
+## 2. 矩阵负载揭示了向量表达的代价
 
-One of RVV's strengths is that it makes the structure of computation explicit to both software and hardware. When matrix workloads are expressed using vector instructions, the execution behavior of those workloads becomes observable rather than hidden behind opaque accelerators.
+RVV 完全可以完成矩阵计算，问题在于需要付出多少代价。二维矩阵被拆成一维向量片段后，软件要安排加载、计算、累加和循环推进。计算量越大，这些组织工作对指令供给和寄存器容量的压力就越值得分析。这不是 RVV“失败了”，而是通用向量与专用矩阵指令的取舍不同。
 
-The matrix multiplication in RVV can be categorized based on the size of the matrix. The small-size matrices which can fit into the VLEN of the vector registers can be loaded, calculated, and stored to memory fairly efficiently. The medium-size matrices in which one dimension of the matrix (matrix A) can fit into the vector registers, then the RVV is still very efficient in loading only matrix B, to calculate and accumulate the result data to write result data into matrix C. For VLEN=512b and SEW=32b, each vector register is 16 elements, the vector processor can hold 128 elements for 1 dimension of the matrix A. For SEW=16b, then the vector processor can hold 256 elements for 1 dimension of the matrix A. The large-size matrices is shown in Figure 6-4 where the matrices are loaded per calculation and accumulation of the result data.
+![LMUL 寄存器分组与矩阵块](images/fig6-2-lmul-vs-matrix-tiles.png)
 
-In matrix-dominated kernels, computation is typically organized as long, deeply pipelined sequences of vector operations with high arithmetic intensity. In such cases, the impact of execution latency is magnified: a single stall can propagate across many cycles of computation, reducing utilization of wide vector pipelines. When instruction and memory latencies are predictable, vector execution can be structured to overlap independent operations and amortize unavoidable delays across large numbers of elements. Conversely, unpredictable latency disrupts pipeline flow and limits effective throughput, regardless of peak functional-unit capability.
+**图 6-2　LMUL 寄存器组与矩阵块的比较**
 
-This observation is architectural rather than implementation specific. By exposing vector length, memory access patterns, and iteration structure, RVV allows both programmers and architects to see where performance is lost and why dense linear algebra places unique demands on execution efficiency.
+LMUL 可以扩大单个向量操作数，却不会给它增加行、列维度的语义。矩阵块寄存器则直接描述二维数据，使一条指令能够启动块级计算，并让硬件在内部安排一部分重复运算和数据复用。
+
+这种差别会反映到动态指令数上。采用点积式向量化时，一个矩阵块需要拆成多个片段，分别加载、相乘和归约；采用外积式分块时，可以省去显式归约，但仍要用多条向量指令更新输出块。矩阵指令则可以把更多内层工作封装成一次操作。
+
+![向量操作与矩阵操作的指令开销](images/fig6-3-instruction-overhead.png)
+
+**图 6-3　向量与矩阵操作的指令开销**
+
+图左用一个简化的点积循环说明指令开销：每轮包含加载 A、加载 B、乘法、归约、两次指针更新和分支，共 7 条以上指令。若 M=N=K=256，每轮处理 VL=32 个元素，则内层循环共执行 `256×256×(256/32)=524,288` 轮；按每轮 7 条计，约为 367 万条指令。
+
+图右使用 16×16 矩阵块，TM=TN=TK=16。沿三个维度分块，共有 `(256/16)³=4,096` 次块乘累加更新。原文按每次更新 4 条指令估算，得到 16,384 条，想强调的是块级指令对前端开销的摊薄作用。
+
+> **译注：**4,096 是沿 K 分块后的更新次数，不是输出块数量；输出块只有 `(256/16)²=256` 个，每个要累加 16 次。C 块若全程驻留，通常不必每次更新都存回。原文“每个输出块只需四条指令”和“减少 200 多倍”依赖过度简化的计数模型，不能据此推导实际加速比，也不能代表优化后的 RVV GEMM。
+
+> **图中代码说明：**原图中的 `VLEN=32` 实际指每轮 32 个元素，应理解为 VL；`bne k, k, loop` 比较同一寄存器，不会形成循环；处理 32 个 FP32 元素时，连续地址应推进 128 字节，而不是图中的固定 32 字节。B 的列能否用连续加载取得，也取决于其是否已经转置或打包。因此该图只用于理解指令类别，不能直接照抄为程序。
+
+这些开销并非 RVV 独有。矩阵计算通常具有大量数据复用机会和规则的长循环；向量实现若没有做好分块和复用，就容易反复搬运同一批数据，增加指令数和寄存器压力。专用矩阵指令希望在这些场景中进一步提高效率。
+
+### 2.1 从矩阵块到二维计算阵列
+
+本章讨论的方案用矩阵块寄存器保存数据，并由乘累加处理单元（PE）阵列执行计算。每个 PE 将 A、B 的相应元素相乘，再累加到局部部分和；阵列通过协调数据传递和累加，完成块乘积。
+
+> **译注：**软件可见的 tile 形状与物理 PE 阵列形状不是同一个概念。较大的 tile 可以分多拍映射到较小阵列，也可以通过增大阵列提高并行度。物理互连固定，不代表矩阵 ISA 只能暴露固定形状；可查询、可配置或可伸缩的 tile 都是可能的设计选择。
+
+这种数据流与典型的向量流水执行方式有所不同：
+
+- 在向量单元中，元素通常沿通道流动，相关指令按元素或元素组逐步衔接；
+- 在矩阵阵列中，A、B 操作数可以按选定的数据流在二维阵列中传播或驻留，输出部分和则常常保存在 PE 或本地累加器中，直到当前输出块完成。
+
+这种局部存储与空间复用，是矩阵执行获得高能效的重要来源。
+
+矩阵阵列会根据数据流选择让某些数据长期留在本地。最常见的例子是输出驻留（output-stationary）：C 的部分和跨越 K 维的多轮 MAC 持续驻留，而 A、B 数据流经阵列；在操作数驻留（operand-stationary）数据流中，也可以让 A 或 B 的一部分保持不动，反复与另一操作数配合。这样，加载和指令开销就能被大量计算摊薄。
+
+> **译注：**不能把这种差别理解为“向量数据只能用一次，矩阵数据才可以长期驻留”。RVV 同样可以让 C 的部分和跨整个 K 循环留在向量寄存器中，第 5 章的代码就是例子。复用机会来自矩阵运算本身；矩阵指令、局部存储和 PE 数据流的优势，是用更少的显式指令、更合适的数据路径实现这种复用。
+
+![向量与矩阵块的生命周期和复用](images/fig6-4-vector-matrix-lifetime.png)
+
+**图 6-4　向量与矩阵块的生命周期和复用**
+
+图中对比的是两种示例调度：左侧的向量写法反复加载、计算、存储，右侧的矩阵写法让累加块跨多轮计算驻留。原图中的“single-use”和“no persistence”不适用于所有向量实现，不能用来定义向量寄存器的生命周期。
+
+矩阵乘法可以自然拆成分块循环：
+
+- A 块覆盖 M、K 两个维度，尺寸记为 TM×TK；
+- B 块覆盖 K、N 两个维度，尺寸记为 TK×TN；
+- C 块覆盖 M、N 两个维度，尺寸为 TM×TN，并沿 K 维不断累加。
+
+一条块乘累加指令更新一个 C 块，因此块形状会影响：
+
+- 软件和编译器采用的分块策略；
+- 每次加载能够获得多少数据复用；
+- 计算量与内存流量的比例；
+- 每个输出元素所需指令数。
+
+矩阵块太小，指令和搬运开销不容易摊薄；矩阵块变大，通常需要更多存储，也可能增加调度复杂度。若同时扩大物理阵列，还会增加 PE、互连、面积和时序成本；若阵列不变，则需要更多执行拍次。因此，不能仅凭 tile 大小推断峰值算力，而要同时考察阵列、存储和带宽。
+
+矩阵块寄存器文件及本地存储的容量，还限制了多少 A/B 数据和 C 部分和能够同时驻留。究竟保留哪一类数据、保留多久，需要结合阵列组织、存储容量和软件调度决定，并非仅靠“使用矩阵指令”就自动获得充分复用。
+
+在这种设计中，矩阵扩展可以与向量架构分工协作：
+
+- 标量核负责循环、分支和指针更新，RVV 负责数据整理、布局转换及适合向量化的不规则计算；
+- 矩阵单元加速规则、复用率高的稠密内层循环。
+
+作者倾向于由具体实现选择矩阵块形状和数量，在面积、功耗与性能之间权衡，同时保留 RVV 的向量长度无关编程能力。固定形状是其中一种选择，并非矩阵 ISA 的必然限制。
+
+矩阵扩展希望提供的，正是这样的块级操作：让指令能直接表达一批矩阵计算，同时与通用向量操作配合。
+
+### 2.2 矩阵块加速架构中的软件职责
+
+矩阵扩展为二维计算引入矩阵块级抽象，但软件仍要组织整个矩阵内核。矩阵块执行并不会消除向量操作，而是重新划分软硬件之间的职责：
+
+- 标量指令管理外层循环和指针，RVV 执行数据整理、布局转换等向量工作；
+- 矩阵指令加速复用率最高的稠密内层循环。
+
+软件需要决定：
+
+- 如何把矩阵划分为多个块；
+- 以什么顺序调度这些块；
+- 如何把数据送入和移出矩阵块寄存器文件；
+- 如何选择与实现参数相匹配的分块尺寸；
+- 如何安排内存布局以最大化局部性；
+- 如何安排矩阵块的加载和存储，使计算阵列持续获得操作数。
+
+编译器和数学库需要理解矩阵块形状、寄存器文件容量和硬件提供的数据复用方式，就像面向 RVV 优化时需要理解 VL、LMUL 和目标微架构一样。
+
+若矩阵实现采用固定或有限可配置的块形状，软件就按这些参数选择循环边界和分块尺寸。RVV 则通过 `vsetvl*`，根据剩余元素数、`vtype` 和实现容量取得每轮 VL。无论采用哪种模型，要获得最佳性能，通常都需要了解目标机器的存储层次和计算资源。
+
+> **译注：**原文把 RVV 的适配机制写成“运行时由硬件选择 VLEN”。实际动态选择的是 VL，VLEN 是每个 hart 固定的实现参数。此外，普通循环控制和指针更新主要由标量指令完成，不能统称为 RVV 的职责。
+
+软件还要协调向量单元与矩阵单元之间的数据搬运：用 RVV 加载、转置或打包数据，交给矩阵指令完成密集计算，再用标量或向量代码处理结果、边界及不足整块的区域。两类单元如何传递数据，要看具体矩阵方案定义的接口。
+
+矩阵单元因此更适合作为补充：它加速规则的二维内层计算，RVV 和标量核则处理整个程序中更灵活、更零散的工作。
 
 ---
 
-## 4. The Community Response: Specialization, Not Replacement
+## 3. 用向量指令看清矩阵计算的瓶颈
 
-The emergence of the RISC-V Matrix Extension should be understood in this context. It represents a specialization layered on top of a proven and scalable foundation.
+RVV 的一个优点，是把计算步骤明确写在指令流中。分析矩阵内核时，可以沿着加载、运算、累加和写回逐步查看，判断瓶颈来自指令供给、数据搬运，还是计算依赖。
 
-RVV remains the general-purpose data-parallel model within the RISC-V ecosystem. It is the tool of choice for irregular computation, control-heavy code, and mixed workloads. The Matrix Extension, by contrast, targets the specific case of dense, regular inner loops where computation is naturally expressed in two dimensions and where instruction overhead and data reuse dominate performance.
+按矩阵规模，可以粗略分为：
 
-This division of roles mirrors a broader trend across processor architectures. Rather than forcing all workloads into a single abstraction, modern ISAs increasingly provide multiple, complementary execution models. Within RISC-V, the Matrix Extension continues this pattern by building on RVV's portability while allowing matrix-dominant kernels to be expressed more directly and efficiently.
+- **小矩阵：**所需数据能够放入可用的向量寄存器容量，可以较高效地加载、计算并写回；
+- **中等矩阵：**例如矩阵 A 的一个维度能够保留在 VRF 中，内核可以持续加载 B，并把结果累加到 C。VLEN=512、SEW=32 时，单个向量寄存器可容纳 16 个元素；若 LMUL=8，一个寄存器组可容纳 128 个元素。SEW=16 时，相同寄存器组可容纳 256 个元素；
+- **大矩阵：**全部数据无法同时留在 VRF 中，每轮需要按矩阵块或向量片段加载数据，并跨多轮累加部分结果。
 
----
+矩阵密集内核通常具有较高算术强度，并由较长、深度流水化的向量指令序列组成。一次停顿可能影响后续多个周期，降低宽流水线的利用率。若指令和内存延迟较为稳定，软件与硬件就更容易重叠彼此独立的操作，并把不可避免的延迟摊到大量元素上；若延迟频繁波动，数据供给就可能被打断，即使功能单元的峰值很高，持续吞吐率仍会下降。
 
-## 5. Status and Scope of the Matrix Extension
-
-At the time of writing, the RISC-V Matrix Extension is under active definition and has not yet been ratified. Toolchain work and hardware prototypes demonstrate feasibility and direction, but the specification remains subject to refinement as the community balances performance goals, implementation complexity, and long-term software compatibility.
-
-The RISC-V Matrix Extension formalizes the architectural specialization implied by the performance behavior discussed earlier in this chapter.
-
-At the architectural level, this specialization centers on a dedicated matrix register file that holds two-dimensional tiles as first-class objects. Unlike RVV vector registers, which expose only one-dimensional structure, matrix tiles preserve row-and-column relationships directly in hardware. This allows matrix kernels to express computation at the granularity of tiles rather than individual vector slices, eliminating much of the loop, pointer, and register-management overhead required in vectorized implementations.
-
-Matrix tile geometry is fixed because it reflects the physical organization of the underlying processing-element (PE) array. Unlike vector lanes, which can scale independently, the PEs in a matrix array are spatially interconnected: each element of A and B must traverse specific paths, and partial sums must remain local to the same PE across many cycles. This wiring regularity enables high reuse and predictable timing, but it also means tile dimensions are tied directly to the physical layout of the compute fabric. As a result, tile size is implementation-defined rather than software-scalable, balancing compute density with area, power, and timing constraints.
-
-Matrix execution is tightly integrated with, rather than isolated from, the vector architecture. RVV remains responsible for scalar and vector control, data marshaling, layout transforms, and post-processing, while matrix instructions perform the dense inner-loop computation. Together, the two execution models form a layered architecture in which vectors provide generality and portability, and matrix tiles provide efficiency where computation is inherently two-dimensional.
-
-A matrix instruction such as `mma.mm` initiates a multi-cycle, spatially distributed computation across the entire PE array. During execution, elements of A and B propagate across the array while each PE performs multiply-accumulate operations on its local operands and partial sums. The instruction completes only when the full TM×TN tile has been produced. Although multi-cycle, this approach performs many MAC operations per cycle and amortizes instruction overhead across the entire tile, yielding far higher effective throughput than issuing per-vector or per-element operations.
-
-Because each matrix instruction encapsulates the work of dozens or hundreds of vector-width operations, its multi-cycle latency is overshadowed by the massive amount of computation performed per issue, allowing the architecture to sustain high utilization with minimal instruction bandwidth.
-
-This division of responsibility reflects a broader architectural principle: when the structure of a workload is known and regular, specialization can improve efficiency without sacrificing correctness or software longevity. The Matrix Extension embodies this principle by preserving RVV's programming model while introducing a native abstraction for the matrix-dominant kernels that increasingly define modern workloads.
-
-Vectors and tiles coexist cleanly because they target fundamentally different structures of computation. Vectors excel at control-heavy loops, irregular access patterns, and data marshaling, while tiles accelerate the dense, regular inner loops where reuse is high and computation is naturally two-dimensional. The two models reinforce rather than replace one another, forming a layered execution environment that spans the full spectrum of data-parallel workloads.
-
-This specialization preserves the strengths of RVV while enabling matrix-dominant kernels to be expressed directly, with dramatically reduced instruction overhead and improved data reuse. The result is an architectural progression, not a divergence: scalable vectors remain the general-purpose substrate, while matrix tiles provide a native abstraction for the workloads that now dominate modern computing.
-
-This approach aligns with a broader industry trend seen in architectures such as AMX, SVE2 Matrix, and TensorCores, all of which employ fixed-geometry tiles backed by spatial compute arrays to accelerate dense linear algebra.
-
-As the Matrix Extension continues toward ratification, it should be understood as the next logical step in RISC-V's evolution—extending a portable vector architecture into a coherent, layered compute model that spans scalar, vector, and matrix execution without sacrificing openness or software longevity.
+VL、访存指令和分段循环让这些工作量更容易分析；实际停顿出在哪里，仍需结合具体微架构和性能测量。稠密线性代数的高吞吐要求，也正是在这里转化为对指令供给、数据复用和流水线稳定性的要求。
 
 ---
 
-## Summary
+## 4. 社区的回应：专用化，而不是替代
 
-The RISC-V Vector Extension solved the portability problem for data-parallel computation by decoupling software from fixed vector widths. When applied to matrix-dominated workloads, RVV reveals—but does not cause—the structural cost of mapping two-dimensional computation onto a one-dimensional abstraction: rising instruction overhead, register pressure, and repeated data movement that grows with problem size. The RVV can still efficiently execute small and medium matrix multiplication without requiring matrix multiplication accelerators.
+理解 RISC-V 矩阵扩展，可以从这种分工出发：保留通用向量能力，再增加面向稠密矩阵计算的专用指令和硬件。
 
-The Matrix Extension responds by introducing tiles as first-class architectural objects backed by a physical two-dimensional PE array. Tiles remain resident across many multiply-accumulate operations, amortizing memory access and instruction overhead in ways that one-dimensional vectors cannot. Software retains responsibility for partitioning, scheduling, and data marshaling, while hardware provides a high-throughput substrate for dense inner loops.
+- RVV 仍是 RISC-V 生态中的通用数据并行模型，适合数据整理、带条件的数据并行代码和混合负载；
+- 矩阵扩展专门面向稠密、规则的内层循环，其中计算天然为二维结构，指令开销和数据复用决定性能。
 
-The result is an architectural progression rather than a replacement: scalable vectors remain the general-purpose foundation for control flow, irregular computation, and data movement, while matrix tiles provide a native abstraction for the regular, reuse-intensive kernels that increasingly define modern workloads.
+这也符合现代处理器的一种发展趋势：不同类型的工作交给互补的执行单元，而不是要求同一套指令高效处理所有问题。矩阵扩展的目标，是让密集矩阵计算得到更直接的表达，同时与已有的软件和执行资源协作。
+
+---
+
+## 5. 矩阵扩展的状态与范围
+
+本译稿依据的英文版本（源提交日期 2026-07-25）将 RISC-V 矩阵扩展描述为仍在讨论和定义中、尚未批准。工具链和硬件原型展示了若干方向，但性能目标、实现复杂度和长期兼容性仍需权衡。本节保留的是该版本的背景，不代表已核实译稿修订时的最新标准状态。
+
+本章的矩阵方案通过专用矩阵寄存器文件直接表达二维块。RVV 操作的是一维元素序列，矩阵指令则保留行列关系，使软件能够按块组织计算，减少逐片发出向量指令和管理寄存器的开销。
+
+底层 PE 通过规则互连传递 A、B 元素，并在本地保留部分和，以减少远距离搬运。作者希望矩阵块参数充分考虑这种物理组织，在性能、面积、功耗和时序之间取得平衡。但正如 2.1 节所述，体系结构 tile 不必与物理阵列一一对应，固定互连也不排斥可配置或可伸缩的编程模型。
+
+作者强调矩阵执行应与现有处理器紧密协作：标量指令处理控制流程，RVV 负责适合向量化的数据整理和后处理，矩阵指令承担稠密内层计算。这样既保留通用性，也能在矩阵计算占主导的场景中提高效率。
+
+以原文的示例助记符 `mma.mm` 为例，一条指令启动一次块乘累加。A、B 数据进入阵列，各 PE 执行 MAC，经过多个周期更新 TM×TN 的输出块。虽然单条指令延迟较长，却包含大量运算，可以把取指、译码开销分摊到更多 MAC 上。
+
+> **译注：**`mma.mm` 是原文的示例写法，不代表标准已经确定该助记符或操作数格式。沿 K 分块时，一次指令只贡献当前 TK 范围的乘积；通常还要经过多次块乘累加，才能得到最终输出块。
+
+矩阵指令把更多工作交给内部执行，不意味着延迟消失了。其优势在于减少前端指令需求；能否维持高利用率，还要看操作数供给、累加依赖和阵列调度。
+
+这体现了专用化的价值：当工作负载结构明确而规则时，可以用专门的指令和数据通路减少通用执行方式的开销，同时通过稳定接口维持软件兼容性。
+
+向量适合数据整理、条件选择、灵活访存和多种数据类型；矩阵块更专注于复用率高的稠密内层循环。二者分工后，可以覆盖更完整的工作负载。
+
+Intel AMX、Arm SME/SME2 和 GPU Tensor Core 也体现了这种专用化趋势：用更适合矩阵计算的数据组织与执行路径，提高稠密线性代数的效率。
+
+> **译注：**原文写作“SVE2 Matrix”，这里改为 SME/SME2；SVE2 本身是向量扩展。此外，不能把这些架构统称为同一种“固定形状 tile”：AMX 允许在硬件限制内配置 tile，SME 的 ZA 大小随流式向量长度伸缩，Tensor Core 又有自己的矩阵片段与线程协作模型。它们的共同点是矩阵专用化，不是软件可见形状完全相同。
+
+若相关矩阵方案形成稳定标准，RISC-V 便能进一步完善标量、向量和矩阵协作的计算体系，在开放接口之上兼顾通用性与专用效率。
+
+---
+
+## 小结
+
+RISC-V 向量扩展通过把程序与固定指令宽度解耦，显著改善了数据并行软件的可移植性。矩阵负载映射到 RVV 后暴露的并不是 RVV 本身的失败，而是用一维向量片段组织二维计算时可能出现的额外开销：随着问题规模增长，动态指令数、寄存器压力和数据搬运都可能上升。即便如此，经过合理分块和调度的 RVV 仍能高效处理许多小型与中型矩阵计算，并非所有场景都需要专用矩阵单元。
+
+本章讨论的矩阵方案直接提供块级操作，并利用 PE 阵列和局部存储，让部分和或输入操作数跨多轮 MAC 留在本地。复用并非矩阵单元独有，但矩阵专用指令与数据路径可以更高效地实现它。
+
+软件仍负责分块、调度和数据整理，硬件则为稠密内层循环提供高吞吐计算能力。因此，这是一种补充式的架构演进，而不是替代：
+
+- 标量核负责控制，可伸缩向量承担通用数据并行计算和数据整理；
+- 矩阵块为规则、高复用且二维结构明显的现代计算内核提供更直接的表达。
+
+
+---
+
+## 支持原作与反馈
+
+*译者附记*
+
+**如果这篇内容对你有帮助，欢迎访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并向原作者分享你的阅读反馈。** 这是作者在授权交流中特别提出的期待，也是支持这份教程继续完善的一种方式。
+
+反馈不必很长：哪一章最有帮助、哪个概念仍不清楚、希望增加哪些算例，都值得告诉作者。作者不阅读中文，建议使用简短英文，并注明来自 *RISC-V Vector Primer* 中文译本。
+
+中文翻译的用词、错漏或排版问题，请在译文评论区或中文译稿仓库反馈，由译者跟进；不要将译文中的问题视为原作者已经审定的内容。

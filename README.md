@@ -1,74 +1,73 @@
-# RISC-V Vector Primer 中文译本
+# RISC-V 向量入门（中文译本）
 
-**[开始阅读中文译本](zh-CN/README.md)** · [术语表](zh-CN/GLOSSARY.md) · [翻译与授权说明](zh-CN/TRANSLATION-NOTICE.md)
+这是一份侧重工程实现的入门指南，系统介绍 RISC-V 向量扩展（RVV 1.0），并讨论仍在演进中的 RISC-V 矩阵扩展。适合处理器架构师、编译器工程师，以及从事嵌入式和边缘 AI 开发的读者。
 
-本仓库由 Ch'in 维护，收录经原作者邮件许可、用于非商业技术教育的非官方简体中文译本。原作者未审校中文译文，授权不代表对译文的背书。
+> **经原作者邮件许可翻译，用于非商业技术教育。** 中文翻译：Ch'in。本译稿为非官方版本，未经原作者中文审校；授权摘要见[翻译说明](TRANSLATION-NOTICE.md)。
 
-原作作者为 **Thang Minh Tran、Paul Miller**，编辑为 **Jonah McLeod**，出版方为 **Simplex Micro**。译文基于[英文原仓库](https://github.com/simplex-micro/riscv-vector-primer)的 `fc66957a6458842beeabe9d85065ff334ccbd333`（2026-07-25）。保留原作 [CC BY-NC-ND 4.0 许可证](LICENSE)，翻译发布依据另行取得的邮件许可。
+翻译术语见[术语表](GLOSSARY.md)，本轮技术纠正与审校范围见[修订记录](REVISION-NOTES.md)；平台署名与发布流程见[发布准备说明](PUBLISHING-GUIDE.md)。
 
-> **支持原作，向作者反馈**：原作者特别希望读者访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并通过官网提供的联系渠道分享阅读反馈。欢迎用简短英文说明哪些章节对你有帮助、哪些概念还不够清楚，或希望增加哪些实例。中文翻译的措辞、错字及译注问题，请在本仓库提交 [Issue](https://github.com/Ch1-n/riscv-vector-primer-zh-CN/issues)，由译者跟进。
+> **支持原作：访问官网，把反馈带给作者。**
+>
+> 作者在授权交流中特别希望中文读者访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并分享阅读感受或改进建议。如果这本教程对你有帮助，欢迎告诉作者：哪一章最有启发、还有哪些概念不够清楚、希望补充哪些算例。建议使用简短英文，并注明来自本书中文译本。
 
-## 中文目录
+中文翻译的用词、错漏和排版问题，请在[本仓库 Issues](https://github.com/Ch1-n/riscv-vector-primer-zh-CN/issues) 或译文评论区提出，由译者跟进。对原书内容的反馈与对译文的勘误，请尽量区分。
 
-- [第一章](zh-CN/chapter-01.md)
-- [第二章](zh-CN/chapter-02.md)
-- [第三章](zh-CN/chapter-03.md)
-- [第四章](zh-CN/chapter-04.md)
-- [第五章](zh-CN/chapter-05.md)
-- [第六章](zh-CN/chapter-06.md)
+**阅读正文：**可以浏览下列章节，也可以从[第 1 章](chapter-01.md)开始顺序阅读。  
+如需关注英文原作的后续更新，请收藏或关注[原仓库](https://github.com/simplex-micro/riscv-vector-primer)。
 
-以下保留英文原作 README，便于对照与引用。
+## 目录结构
 
----
-
-# 📘 RISC-V Vector Primer
-
-An implementation-focused guide to the RISC-V Vector Extension (RVV 1.0) and the emerging Matrix Extension — written for architects, compiler engineers, and embedded/edge AI developers.
-
-➡️ **Read the chapters:** Browse the chapter files below or [start with Chapter 1](chapter-01.md)
-⭐ **Star the repo if you’d like to follow updates**
+- `chapter-01.md` 至 `chapter-06.md`：中文正文，本地图片统一引用 `images/`。
+- `images/`：中文正文使用的全部图片。
+- `GLOSSARY.md`：中英文术语表。
+- `REVISION-NOTES.md`：审校范围、重要技术纠正及规范依据。
+- `TRANSLATION-NOTICE.md`：翻译与授权说明。
+- `PUBLISHING-GUIDE.md`：发布和署名规范。
 
 ---
 
-Published by **Simplex Micro**
+英文原作由 **Simplex Micro** 发布。
 
-Welcome to the online edition of the **RISC-V Vector Primer**, a comprehensive guide to understanding, implementing, and applying the RISC-V Vector Extension (RVV). This site hosts the full book in chapter-based form, published openly for engineers, architects, students, and practitioners who want a clear and practical understanding of modern vector computation.
+这是 *RISC-V Vector Primer* 的非官方简体中文译稿。原书以分章形式系统介绍 RISC-V 向量扩展（RVV），面向希望从工程角度理解现代向量计算的架构师、工程师、学生和相关从业者。
 
-The primer explains RVV from first principles through real hardware design, performance analysis, and the architectural path toward matrix acceleration. It is grounded in decades of industry experience and written to be both accessible and technically rigorous.
-
----
-
-## **Authors**
-
-### **Dr. Thang Tran — Founder, CEO & CTO**
-A microprocessor architect with over 40 years of experience across x86, Arm, PowerPC, ARC, and RISC‑V. Dr. Tran led the design of the AndesCore NX27V—the first commercial RISC‑V vector processor—and has held senior roles at AMD, Texas Instruments, Andes Technology, and Condor Computing.
-
-### **Paul Miller — Senior Fellow of Architecture and Design**
-A senior microprocessor designer with 35+ years of experience in RISC, x86, ARM, DSP, and GPU architectures. Paul has designed floating‑point units, SIMD engines, and AI accelerators, and now contributes to Simplex Micro’s RISC‑V Vector and Matrix processor development.
-
-### **Jonah McLeod — Editor**
-An award‑winning editor with 30+ years of Silicon Valley experience. Jonah has led major high‑tech publications and held senior communications roles at Virage Logic, Denali Software, Kilopass Technology, and Andes Technology.
+全书从基本概念出发，逐步深入到实际硬件设计、性能分析，以及从向量计算走向矩阵加速的架构思路。内容建立在作者团队数十年的产业经验之上，力求兼顾可读性与技术严谨性。
 
 ---
 
-## How to Cite This Book
+## 作者
 
-If you reference this work in academic papers, technical articles, presentations, or documentation, please cite it as follows.
+### Thang Tran 博士：创始人、CEO 兼 CTO
 
-**Preferred citation (long form):**
+微处理器架构师，在 x86、Arm、PowerPC、ARC 和 RISC-V 领域拥有 40 余年经验。Tran 博士曾领导 AndesCore NX27V 的设计，该产品是首款商用 RISC-V 向量处理器；他还曾在 AMD、Texas Instruments、Andes Technology 和 Condor Computing 担任高级职位。
+
+### Paul Miller：架构与设计高级研究员
+
+资深微处理器设计师，在 RISC、x86、Arm、DSP 和 GPU 架构方面拥有 35 年以上经验。Paul 设计过浮点单元、SIMD 引擎和 AI 加速器，目前参与 Simplex Micro 的 RISC-V 向量与矩阵处理器研发。
+
+### Jonah McLeod：编辑
+
+获奖编辑，在硅谷拥有 30 余年从业经验。Jonah 曾领导多家重要高科技出版物，并在 Virage Logic、Denali Software、Kilopass Technology 和 Andes Technology 担任高级传播职位。
+
+---
+
+## 如何引用原书
+
+在论文、技术文章、演示文稿或文档中引用本书时，请引用英文原作，而不是把中文译稿列为原始来源。
+
+**推荐的完整引用格式：**
 
 Tran, Thang Minh; Miller, Paul; McLeod, Jonah.  
 *RISC-V Vector Primer: An Implementation-Focused Guide to the RISC-V Vector Extension*.  
 Simplex Micro, 2025.  
 Available at: https://github.com/simplex-micro/riscv-vector-primer
 
-**Short citation:**
+**简短引用格式：**
 
 T. M. Tran, P. Miller, and J. McLeod, *RISC-V Vector Primer*, Simplex Micro, 2025.
 
-When citing a specific chapter, please include the chapter title and, if applicable, the version or commit date.
+引用特定章节时，应补充章节标题，并在必要时注明版本或提交日期。
 
-**BibTeX:**
+**BibTeX：**
 
 ```bibtex
 @book{TranRiscVVectorPrimer2025,
@@ -76,43 +75,39 @@ When citing a specific chapter, please include the chapter title and, if applica
   author       = {Tran, Thang Minh and Miller, Paul and McLeod, Jonah},
   year         = {2025},
   publisher    = {Simplex Micro},
-  url          = https://github.com/simplex-micro/riscv-vector-primer
+  url          = {https://github.com/simplex-micro/riscv-vector-primer},
   note         = {Online edition}
 }
----
 ```
-## **Chapters**
 
-- **Chapter 1 — RISC‑V Vector Extension Demystified**  
-  A conceptual foundation: vector vs SIMD, time–space duality, chaining, strip mining, and the mental models needed to understand RVV.
+## 章节
 
-- **Chapter 2 — From Concept to Core: A RISC‑V Vector Processor in Silicon**  
-  How RVV maps into real hardware: lanes, VRF design, port pressure, micro‑ops, and a concrete 512‑bit implementation.
+- **[第 1 章：揭开 RISC-V 向量扩展的面纱](chapter-01.md)**  
+  建立概念基础：向量与 SIMD、时间-空间对偶、链式执行、分段处理，以及理解 RVV 所需的思维模型。
 
-- **Chapter 3 — RISC‑V Vector Extension Fundamentals**  
-  SEW, LMUL, VLEN, VLMAX, masking, vtype, vsetvl, register grouping, functional units, memory behavior, and CSR semantics.
+- **[第 2 章：从概念到芯片：RISC-V 向量处理器的实现](chapter-02.md)**  
+  介绍 RVV 如何映射到真实硬件：通道、VRF 设计、端口压力、微操作，以及一个具体的 512 位实现。
 
-- **Chapter 4 — Vector Instructions**  
-  Memory operations, compute operations, widening/narrowing, fixed‑point and floating‑point arithmetic, reductions, masks, permutations, and register movement.
+- **[第 3 章：RISC-V 向量扩展基础](chapter-03.md)**  
+  介绍 SEW、LMUL、VLEN、VLMAX、掩码、`vtype`、`vsetvl`、寄存器分组、功能单元、访存行为和 CSR 语义。
 
-- **Chapter 5 — Matrix Computation and Performance Analysis**  
-  Single‑precision GEMM, low‑precision MAC pipelines, chaining, memory bandwidth, tiling, and deterministic execution for AI workloads.
+- **[第 4 章：向量指令](chapter-04.md)**  
+  介绍访存、计算、加宽/窄化、定点与浮点运算、归约、掩码、置换和寄存器移动指令。
 
-- **Chapter 6 — From Vectors to Matrices**  
-  Why matrix workloads expose structural limits of 1‑D vectors, the architectural rationale for matrix tiles, PE arrays, tile geometry, and the emerging RISC‑V Matrix Extension.
+- **[第 5 章：RISC-V 向量扩展中的矩阵计算与性能分析](chapter-05.md)**  
+  介绍单精度 GEMM、低精度 MAC 流水线、链式执行、存储带宽、分块，以及 AI 工作负载的确定性执行。
+
+- **[第 6 章：从向量到矩阵：RISC-V 矩阵扩展的架构思路](chapter-06.md)**  
+  说明矩阵工作负载为何会暴露一维向量表达的额外开销，并讨论矩阵块、PE 阵列、数据驻留，以及仍在演进的 RISC-V 矩阵扩展背后的架构动机。
 
 ---
 
-## **About This Publication**
+## 关于英文原作
 
-This primer is published by **Simplex Micro** as part of its mission to advance open, accessible technical education in RISC‑V vector and matrix processing. The content is released incrementally and updated as the book evolves.
+Simplex Micro 发布本书，旨在推动开放、易于获取的 RISC-V 向量与矩阵处理技术教育。英文内容采用增量方式发布，并随书稿演进持续更新。
 
-**Source repository:**  
-https://github.com/simplex-micro/riscv-vector-primer
----
+本仓库只维护一份中文译稿，不收录英文正文或知乎专用副本。英文原作请访问[原始仓库](https://github.com/simplex-micro/riscv-vector-primer)。
 
-## **License**
+## 许可证与翻译状态
 
-This work is licensed under the Creative Commons
-Attribution-NonCommercial-NoDerivatives 4.0 International License (CC BY-NC-ND 4.0).
-See the LICENSE file for details.
+英文原作采用 [CC BY-NC-ND 4.0](LICENSE) 许可证，原声明保持不变。本译稿已获得原作者针对非商业中文翻译申请的邮件许可，当前发布计划为 GitHub 和知乎；该许可不构成对原作的重新许可。具体记录与边界见[翻译说明](TRANSLATION-NOTICE.md)。

@@ -1,391 +1,472 @@
-# Chapter 4: Vector Instructions
+# 第 4 章：向量指令
 
-This chapter provides a detailed examination of every vector instruction in the RISC-V Vector Extension ISA. Vector instructions fall into four categories: memory operations that move data between the vector register file and memory, compute operations that perform arithmetic and logical transformations, mask operations to set the mask values held in a vector register, and permutation operations that rearrange elements within and across vector registers.
+> 本文是 *RISC-V Vector Primer* 的非官方中文译文，经原作者邮件许可，用于非商业技术教育。
+>
+> 原作者：Thang Minh Tran、Paul Miller；编辑：Jonah McLeod；出版方：Simplex Micro。中文翻译：Ch'in。
+>
+> [英文原作](https://github.com/simplex-micro/riscv-vector-primer) · 依据版本：`fc66957a6458842beeabe9d85065ff334ccbd333`（2026-07-25）。授权摘要及译注原则见[翻译说明](TRANSLATION-NOTICE.md)。原作者未审校中文译文。
+>
+> **支持原作：**作者特别欢迎中文读者访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并分享阅读反馈与改进建议。文末附有反馈说明。
 
----
-
-## 4.1 Memory Operations
-
-Load and store operations move groups of data between the vector register file (VRF) and memory. Some implementations support unaligned addressing, meaning there is no architectural restriction on alignment whatsoever. When data is unaligned, the hardware performs two fetches to retrieve or store the complete data. For example, loading 32 bytes of unaligned data requires two memory fetches: the first retrieves bytes 25 through 31, and the second retrieves the remaining bytes to complete the vector register.
-
-Four basic addressing modes exist for vector memory operations. Unit-stride addressing accesses consecutive elements in contiguous memory. Constant-stride addressing skips a fixed number of bytes between elements, where the stride defines the distance between successive elements. Index (gather/scatter) addressing uses a vector of offsets from a base address to access elements at arbitrary locations in memory. Segmented addressing moves multiple contiguous fields from memory into consecutive vector registers, and can combine with any of the other three addressing modes.
-
-Note that, without constraints, a vector load/store operation may touch a very wide memory address range, which can significantly complicate the implementation. In such cases, an implementation may be forced to service memory accesses effectively one element at a time. For reasonable performance, an implementation may therefore choose to limit the memory range covered by a single vector memory operation.
-
-### 4.1.1 Instruction Format
-
-The vector load and store instructions share a common encoding format. The width field uses specific encodings to avoid overlap with floating-point load/store opcodes—only certain bit patterns are used for vector operations, with others reserved for future extensions to 128-bit, 256-bit, and 1024-bit memory element widths. Currently supported element widths are 8, 16, 32, and 64 bits which should be the same as the element widths for vector register elements.
-
-The opcode field distinguishes between unit-stride, constant-stride, indexed-unordered, and indexed-ordered operations. The distinction between ordered and unordered matters for indexed operations: with ordered addressing, element 0 must complete before element 1, which must complete before element 2, and so forth. With unordered addressing, the implementation can access elements in any sequence that optimizes memory bandwidth—loading elements 0, 5, and 10 in one cycle, then elements 1 and 7 in the next. Ordered operations ensure memory consistency at the cost of performance.
-
-![Load/Store Instruction Encoding Format](fig4-1-load-store-encoding.png)
-
-**Fig. 4-1.** Load/store instruction encoding format
-
-Encoding formats for vector memory operations under the LOAD-FP and STORE-FP major opcodes. Unit-stride formats (VL\*/VS\*) access contiguous elements using the lumop/sumop field for special variants. Strided formats (VLS\*/VSS\*) use rs2 to specify the byte offset between elements. Indexed formats (VLX\*/VSX\*) use vs2 as a vector of address offsets for gather/scatter operations. Common fields: nf specifies segment count (1-8 fields), mew enables extended element widths, mop selects addressing mode (00=unit-stride, 10=strided, 01/11=indexed), vm controls masking, rs1 holds the base address, and width encodes element size. Loads use vd as destination; stores use vs3 as source.
-
-*Adapted from "RISC-V Vector Extension Specification, Version 1.0," RISC-V International, licensed under CC-BY 4.0.*
-
-### 4.1.2 Effective LMUL
-
-The vector load/store encoding for element width is independent with the element width defined in the vtype CSR. In many applications, the memory element width is smaller than the vtype element width where the data is extended to larger element width for better accuracy of computing. A critical concept for vector memory operations is effective LMUL. When you configure vtype with a 16-bit element width, LMUL=1, and VLEN=512, you get 32 elements per vector instruction. All subsequent vector instructions operate on 32 elements regardless of the memory element width specified in each instruction.
-
-Consider a load instruction configured for 16-bit elements that loads into register v4. If you then issue a load with 32-bit elements, the hardware must still process 32 elements, now each 32 bits wide. This requires an effective LMUL of 2, so the destination becomes the register group v4–v5. Because effective LMUL=2, the instruction is only legal if the destination register is even-numbered; otherwise, the CPU must raise an illegal-instruction exception. For 8-bit elements, the 32 elements fit in the first half of a single register, so effective LMUL becomes 1/2. For 64-bit elements, the data spans four registers (v4, v5, v6, v7) with effective LMUL of 4—note the effective LMUL is 4, the load instruction must use a vector register number which is divisible by 4.
-
-This mechanism enables mixed-precision workflows. Load 16-bit data into v1, perform a widening add that produces 32-bit results in v4 and v5, then store with 32-bit element width. The implementation calculates the effective LMUL automatically determines how many physical registers participate in each operation.
-
-### 4.1.3 Unit-Stride Operations
-
-Unit-stride operations are the simplest and most efficient memory access pattern. Element 0 comes from address base, element 1 from base+eew, element 2 from base+2×eew, and so forth, where eew is the effective element width in bytes. This contiguous access pattern maximizes memory bandwidth utilization.
-
-**Fault-Only-First Loads.** A specialized variant of unit-stride loads handles cases where the number of valid elements is unknown at load time. The fault-only-first load (`vle*ff`) takes an exception only if the first element faults which means that vl=0 (no valid element) for the vector load operation; faults on subsequent elements silently terminate the load and update vl to reflect how many elements were successfully loaded.
-
-The canonical use case is string processing. To load a null-terminated string of unknown length, set vl to the maximum vector length and issue a fault-only-first load. This is the reverse of strip-mining (chapter 1) where the vector load is part of a loop operation that will stop at a page boundary, the last iteration of the loop is the modified vl by the fault-only-first load.
-
-Note: the exception from the fault-only-first load is most likely from the memory protection error such as page-fault and not a specific element error. Precise load exception can impact the performance tremendously.
-
-**Whole Register Load/Store.** For context switches, the operating system must save and restore the entire vector register file without regard to the current vtype configuration. Whole register loads and stores ignore vtype, vl, and LMUL settings, transferring complete registers at a time. The element width defaults to 8 bits, and the nf field specifies how many consecutive registers to transfer. No masking is permitted; any attempt to use masking with whole register operations raises an illegal instruction exception.
-
-![Vector Memory Addressing Modes](fig4-2-addressing-modes.png)
-
-**Fig. 4-2.** Vector Memory Addressing Modes
-
-Four addressing modes for vector memory operations: unit-stride accesses consecutive elements, constant-stride accesses elements at fixed intervals, indexed uses a vector of offsets for gather/scatter patterns, and segment interleaves multiple fields for structure-of-arrays transformations.
-
-### 4.1.4 Constant-Stride Operations
-
-Constant-stride operations access elements separated by a fixed byte offset. With stride=2 and 8-bit elements, element 0 comes from address base, element 1 from base+2, element 2 from base+4—every other byte. With stride=8 and 32-bit elements, successive elements are 8 bytes apart.
-
-A stride of zero has special semantics: it broadcasts a single memory location to all elements of the destination vector. This provides an efficient splat operation for loading scalar values into vector registers without consuming a scalar register.
-
-Note that the stride can be any integer value including 0 and negative. For vector load with stride=0, the same memory element is copied to all register elements where it is necessary to fetch only 1 single memory element. For vector store operation with stride=0, a single store operation can be performed by store the last register element to a memory element. The stride can be any integer number which on worse case can span several physical memory pages. A simpler implementation can restrict the stride vector load/store to a single physical memory page and a reasonable memory range. The compiler can modify the program to performance many load instructions (both scalar and vector) and use permutation instructions to arrange the elements in the vector registers.
-
-![Constant-Stride Memory Access](fig4-3-constant-stride.png)
-
-**Fig. 4-3.** Constant-Stride Memory Access
-
-### 4.1.5 Indexed (Gather/Scatter) Operations
-
-Indexed operations use a vector of offsets to access arbitrary memory locations. For gather operations (`vluxei`, `vloxei`), the index vector vs2 contains byte offsets from the base address. If element 0 of vs2 contains 5, element 0 of the destination receives the data at base+5. If element 1 contains 8, element 1 of the destination receives data at base+8. The indices are absolute offsets, not cumulative, and can appear in any order.
-
-Scatter operations (`vsuxei`, `vsoxei`) reverse this process, storing vector elements to indexed memory locations. The same index vector determines where each element lands in memory.
-
-![Indexed (Gather/Scatter) Memory Operations](fig4-4-indexed-gather-scatter.png)
-
-**Fig. 4-4.** Indexed (Gather/Scatter) Memory Operations
-
-The ordered versus unordered distinction matters significantly for indexed operations. Consider a scatter where element 0 targets cache line A, element 1 targets cache line B, element 2 targets cache line A again. An ordered scatter must write to line A, then B, then A again—potentially thrashing the cache. An unordered scatter can reorder these accesses to write elements 0 and 2 to line A together, then element 1 to line B, improving memory efficiency at the cost of strict ordering guarantees.
-
-Note: similar to the stride vector load/store operation, the index can be any integer value where a memory element. A simpler implementation can restrict the index vector load/store to a single physical memory page and a reasonable memory range. With a reasonable memory range, then all index vector load/store can be performed in a single operation where the unordered and ordered vector load/store does not matter. In a way, the index vector load can be done with unit vector loads and permute instruction to re-arrange the register elements. The index vector store is the reversed operation with permutate operation and then unit vector store.
-
-### 4.1.6 Segment Operations
-
-Segment operations load or store multiple interleaved fields into consecutive vector registers. A segment load with nf=4 reads four consecutive memory elements and places them in four different vector registers: element 0 goes to v0, element 1 to v1, element 2 to v2, element 3 to v3, then element 4 goes back to v0 at position 1, and so forth.
-
-This pattern efficiently handles array-of-structures data layouts. Consider an array of RGB pixels where each pixel occupies three consecutive bytes. A segment load with nf=3 separates the interleaved data into three vectors: all red values in v0, all green values in v1, all blue values in v2. Processing can then proceed on each color channel independently.
-
-![Segment Load (nf=3) — Array-of-Structures to Structure-of-Arrays](fig4-5-segment-load-rgb.png)
-
-**Fig. 4-5.** Segment Load (nf=3) — Array-of-Structures to Structure-of-Arrays
-
-As shown above, segment load with nf=3 transforms interleaved RGB pixel data in memory into separate vectors for each color channel. The `vlseg3e8.v` instruction reads three consecutive 8-bit fields per element: R, G, and B values are de-interleaved into registers v0, v1, and v2 respectively. This single instruction replaces three separate strided loads and enables efficient SIMD processing of each channel independently.
-
-Segment operations can be achieved with multiple strided loads, but the single-instruction form offers two advantages: reduced instruction count and potential hardware optimization. For a four-field segment load, four stride-4 loads would accomplish the same result, but the segment instruction encodes the entire operation in a single instruction and allows the hardware to optimize memory access patterns.
-
-![Segment Unit-Stride Load with NF=4](fig4-6a-segment-load-nf4.png)
-
-![Segment Unit-Stride Store with NF=4](fig4-6b-segment-store-nf4.png)
-
-**Fig. 4-6.** Segment Unit-Stride Load/Store with NF=4
-
-The figures above illustrate segment unit-stride load and store operations with NF=4, showing how four interleaved fields are separated into four destination registers during load, and how four source registers are interleaved during store.
-
-Segment operations can also combine with strided and indexed addressing modes.
-
-![Segment Strided Load/Store](fig4-7-segment-strided.png)
-
-**Fig. 4-7.** Segment Strided Load/Store
-
-![Segment Indexed Load/Store](fig4-8-segment-indexed.png)
-
-**Fig. 4-8.** Segment Indexed Load/Store
-
-When LMUL exceeds 1, segment operations become more complex. With LMUL=2, each segment field occupies two consecutive registers. For nf=4 and LMUL=2, segment 0 spans v0-v1, segment 1 spans v2-v3, segment 2 spans v4-v5, and segment 3 spans v6-v7. Indexed segment operations can produce overlapping data when different indices reference the same or adjacent memory locations—this is architecturally permitted.
-
-In a way, the segment vector load/store is a combination of stride and index vector load/store. The same limitation of physical memory page and memory range should apply to ease implementation.
-
-### 4.1.7 Application: Matrix Multiplication
-
-Segment and indexed loads combine effectively for matrix multiplication. Consider multiplying matrix A by matrix B. Load matrix B using segment loads to place each column into a separate vector register: B[0,*] in v0, B[1,*] in v1, and so forth. For matrix A, use indexed loads with appropriate index vectors to broadcast rows across vector elements. The multiplication then proceeds as element-wise vector operations, with reduction instructions accumulating the dot products.
-
-![Matrix Multiplication Using Vector Operations](fig4-9-matrix-multiplication.png)
-
-**Fig. 4-9.** Matrix Multiplication Using Vector Operations
+本章按四条主线介绍 RVV 指令：访存负责搬运数据，计算负责算术与逻辑运算，掩码负责选择参与操作的元素，置换负责重排寄存器中的数据。理解这四类操作如何配合，就能把前一章的编程模型落实到具体指令。
 
 ---
 
-## 4.2 Compute Operations
+## 4.1 访存操作
 
-Compute instructions perform arithmetic, logical, and comparison operations on vector elements. Integer operations support vector-vector, vector-scalar, and vector-immediate forms. Floating-point operations support vector-vector and vector-scalar forms only, as immediate floating-point values cannot be encoded in the instruction.
+向量加载/存储指令在向量寄存器文件（VRF）与内存之间成批搬运数据。RVV 并不要求起始地址按完整向量宽度对齐；至于非对齐元素访问能否正常执行，还取决于实现和运行环境规定的对齐支持。一次访问若跨越自然边界，硬件可能要发出两笔或更多内存请求，再拼成完整结果。例如，一次 32 字节的非对齐加载，可能先读取当前边界末尾的数据，再从下一块读取余下部分。
 
-![Compute Instruction Categories](fig4-10-compute-categories.png)
+向量访存有三种基本寻址模式，以及可与它们组合的分段形式：
 
-**Fig. 4-10.** Compute Instruction Categories
+- **单位步长：**访问内存中连续排列的元素；
+- **固定步长：**相邻元素地址相差固定字节数；
+- **索引式 gather/scatter：**使用相对于基地址的一组向量偏移，访问任意位置；
+- **分段访存：**把内存中交错的多个字段搬入连续向量寄存器，或执行相反操作，并可与前三种寻址模式组合。
 
-All compute instructions share the same opcode, with function fields distinguishing among integer operations (OPI), floating-point operations (OPF), and mask operations (OPM). A six-bit function code encodes the specific operation within each category. See Fig. 3-5 for the complete OP-V instruction format encoding.
+一条向量访存指令可能覆盖很宽的地址范围，极端情况下硬件几乎只能逐元素处理。实现可以限制一拍内并发处理的地址窗口、页数或请求数量，以控制复杂度；这些内部限制只能影响完成方式和性能，不能改变 ISA 规定的可见结果。
 
-```
-vop.vv vd, vs2, vs1, vm    // vector-vector, vd[i]=vs2[i] op vs1[i]
-vop.vx vd, vs2, rs1, vm    // vector-scalar, vd[i]=vs2[i] op x[rs1]
-vop.vi vd, vs2, imm, vm    // vector-imm, vd[i]=vs2[i] op imm
-vfop.vv vd, vs2, vs1, vm   // vector-vector, vd[i]=vs2[i] fop vs1[i]
-vfop.vf vd, vs2, rs1, vm   // vector-scalar, vd[i]=vs2[i] fop f[rs1]
-```
+### 4.1.1 指令格式
 
-![Compute Instruction Encoding Format](fig4-11-compute-encoding.png)
+向量加载与存储采用共同的编码框架。`width` 和 `mew` 字段用于编码 EEW，已定义的宽度为 8、16、32 和 64 位，更大宽度的编码处于保留状态。单位步长和固定步长指令用 EEW 描述数据元素；索引指令则用它描述索引元素的位宽，数据位宽仍为 SEW。
 
-**Fig. 4-11.** Compute Instruction Encoding Format
+`mop` 等字段区分单位步长、固定步长、无序索引和有序索引操作。有序与无序主要影响索引访存：
 
-### 4.2.1 Widening Operations
+- 有序访问要求各元素按索引顺序产生内存效果；
+- 无序访问允许实现为提高带宽而重排内部访问顺序，例如先处理元素 0、5、10，再处理元素 1、7。
 
-Widening operations produce results twice as wide as their inputs. The 'w' prefix indicates a widening operation. Two variants exist: single-width sources to double-width result (`vwop.vv`), and mixed-width sources where one operand is already double-width (`vwop.wv`).
+有序形式提供严格顺序语义，代价通常是较低性能。
 
-```
-vwop.v{v,x} vd, vs2, vs1/rs1   // 2*SEW = sign/zero(SEW) op sign/zero(SEW)
-vwop.w{v,x} vd, vs2, vs1/rs1   // 2*SEW = 2*SEW op sign/zero(SEW)
-vfwop.v{v,f} vd, vs2, vs1/rs1  // 2*SEW = SEW op SEW
-vfwop.w{v,f} vd, vs2, vs1/rs1  // 2*SEW = 2*SEW op SEW
-```
+![向量加载/存储指令编码](images/fig4-1-load-store-encoding.png)
 
-The implementation differs between integer ALU operations and integer multiply. For integer ALU operations (add, subtract, logical), the hardware sign-extends or zero-extends both source operands to double width, performs the operation at double width, and writes the double-width result.
+**图 4-1　加载/存储指令编码格式**
 
-![Widening Integer Add Operations](fig4-12a-widening-add.png)
+向量访存复用 `LOAD-FP` 和 `STORE-FP` 主操作码空间。单位步长格式 `VL*`/`VS*` 通过 `lumop`/`sumop` 表示特殊变体；固定步长格式 `VLS*`/`VSS*` 由 `x[rs2]` 给出元素间的字节步长；索引格式 `VLX*`/`VSX*` 由 `vs2` 提供地址偏移向量。分段访存中，`nf` 编码字段数减 1；`mop` 选择寻址模式，`vm` 控制掩码，`x[rs1]` 提供基地址。加载以 `vd` 为目的，存储以 `vs3` 为数据源。
 
-![Widening Integer Subtract Operations](fig4-12b-widening-sub.png)
+*改编自《RISC-V Vector Extension Specification, Version 1.0》，RISC-V International，CC BY 4.0。*
 
-**Fig. 4-12.** Widening Integer Add and Subtract Operations
+### 4.1.2 有效 LMUL
 
-For integer multiply, the operation is performed at single width, but the result retains all bits of the full product—a 16×16 multiply produces a 32-bit result. Floating-point widening multiply similarly performs the multiply at single precision but retains the extra mantissa bits for the double-width result.
+对单位步长和固定步长访存，指令编码给出的数据 EEW 可以不同于 `vtype` 中的 SEW。许多应用先紧凑地加载窄数据，再扩展为较宽格式计算。理解寄存器占用的关键，是有效 LMUL，也就是 `EMUL = (EEW/SEW) × LMUL`。
 
-![Widening Multiply Operations (vwmul)](fig4-13a-widening-mul.png)
+假设 VLEN=512，配置 SEW=16、LMUL=1，则 VLMAX=32。再设 VL=32、`vstart=0` 且不使用掩码：一条 EEW=32 的加载需要读取 32 个元素，共 1024 位，因此目的 EMUL=2。例如目的写 `v4` 时，实际占用 `v4`～`v5`，起始编号必须按 2 对齐。
 
-![Widening Multiply Operations (vwmulu)](fig4-13b-widening-mulu.png)
+同理：
 
-**Fig. 4-13.** Widening Multiply Operations
+- EEW=8 时，32 个元素只占 256 位，EMUL=1/2；
+- EEW=64 时，32 个元素占 2048 位，EMUL=4，例如从 `v4` 开始会占 `v4`～`v7`，起始编号必须能被 4 整除。
 
-In hardware implementation, a widening operation with LMUL=1 writes to two consecutive vector registers. The processor decomposes this into two micro-operations: the first processes the right half of the source elements, extends them, computes, and writes to the first destination register; the second processes the left half and writes to the second destination register. These micro-operations can execute in sequence or be pipelined.
+这一机制支持混合精度数据流，例如加载 16 位数据，用加宽加法得到 32 位结果，再按 32 位元素存储。硬件根据 EEW、SEW 和当前 LMUL 计算 EMUL，从而确定每个操作数实际占用多少个体系结构向量寄存器。
 
-**Extension Instructions.** Separate widening extension instructions (`vzext`, `vsext`) convert elements to wider types without computation. These support 2×, 4×, and 8× widening—for example, extending 8-bit elements to 64-bit. The maximum extension factor depends on the configured SEW: with SEW=32, only 2× and 4× extensions are legal, since 8× would require 64-bit elements.
+> **译注：**上面的 EEW/EMUL 示例针对单位步长和固定步长数据操作数。索引访存的数据操作数使用 SEW/LMUL，索引操作数才使用指令编码中的 EEW 及相应 EMUL，不能把二者混用。
 
-### 4.2.2 Narrowing Operations
+### 4.1.3 单位步长操作
 
-Narrowing operations reduce double-width values to single-width results. These apply to shift-right operations (logical and arithmetic) and to the fixed-point clip instructions discussed later. The source operand spans two consecutive registers, while the result fits in a single register.
+单位步长是最简单、通常也是效率最高的访存模式。元素 0 位于 `base`，元素 1 位于 `base+EEW_bytes`，元素 2 位于 `base+2×EEW_bytes`，依此类推。连续地址最有利于充分使用内存带宽。
 
-Consider the pattern: load 16-bit data into v1, load 16-bit data into v2, perform a widening add that produces 32-bit results in v4-v5, then perform a narrowing shift-right to compress the 32-bit results back to 16-bit values in v6. This pattern appears frequently in fixed-point DSP algorithms.
+**仅首元素故障加载（fault-only-first load）。**单位步长加载提供 `vle*ff` 变体，适用于事先不知道安全读取边界的场景。若元素索引 0 发生同步异常，指令正常陷入，`vl` 不因此变为 0；若索引 `i>0` 发生同步异常，则不报告这次异常，而将 `vl` 缩短到 `i`。这里的“首元素”不是第一个活动元素，新的 VL 也不是成功访问次数，详见 3.8.2 节。
 
-![Narrowing Shift Operations](fig4-14-narrowing-shift.png)
+字符串扫描是它的典型用途。面对长度未知且可能跨页的字符串，软件可以先请求较大的 VL，再执行仅首元素故障加载；硬件在安全范围内尽可能多取数据，必要时缩短本轮 `vl`。这里处理的是页故障、访问保护等内存异常，而不是“数据值本身出错”。
 
-**Fig. 4-14.** Narrowing Shift Operations
+**整寄存器加载/存储。**操作系统进行上下文切换时，需要在不依赖当前 `vtype` 和 `vl` 的情况下保存、恢复完整 VRF。整寄存器指令可直接传输一个、两个、四个或八个连续向量寄存器；相应编码给出寄存器数量，这类操作也不使用普通的逐元素掩码。
 
-Hardware implementation mirrors widening operations in reverse. The first micro-operation reads from the first source register, performs the narrowing operation, and writes to the right half of the destination. The second micro-operation handles the second source register and the left half of the destination.
+![向量访存寻址模式](images/fig4-2-addressing-modes.png)
 
-### 4.2.3 Integer Arithmetic
+**图 4-2　向量访存的四种寻址模式**
 
-Standard integer operations include add, subtract, and logical operations (AND, OR, XOR), shift operations (logical left, logical right, arithmetic right), comparison operations (equal, not-equal, less-than, less-equal, greater-than, greater-equal for both signed and unsigned), and min/max. Multiply and divide complete the set. These operations are straightforward extensions of scalar equivalents to vector form.
+单位步长访问连续元素；固定步长以固定间隔访问；索引模式用偏移向量实现 gather/scatter；分段模式在多个字段与多个向量寄存器之间进行交错或解交错。
 
-The complete set of integer arithmetic instructions includes:
+### 4.1.4 固定步长操作
 
-- Vector Integer Add, Subtract, Reverse Subtract (including Double Width)
-- Vector Integer Extension
-- Vector Integer Add-with-Carry / Subtract-with-Borrow
-- Vector Bitwise Logical Instructions
-- Vector Bit Shift Instructions (including Narrow Width)
-- Vector Integer Comparison Instructions, write 1/0 to destination register
-- Vector Integer Min/Max Instructions
-- Vector Integer Multiply (including Double Width)
-- Vector Integer Divide and Remainder
-- Vector Integer Multiply-Add/Sub, Multiply-Accumulate (including Double Width)
-- Vector Integer Merge and Move Instructions
+固定步长操作以固定字节偏移访问相邻逻辑元素。若元素宽 8 位、stride=2，则元素地址依次为 `base`、`base+2`、`base+4`，即每隔一个字节取一个元素。若元素宽 32 位、stride=8，则相邻元素在内存中相距 8 字节。
 
-**Carry and Borrow.** Multi-precision arithmetic requires propagating carries across element boundaries. The RISC-V Vector Extension handles this with paired instructions: one produces the result, another produces the carry-out. This approach maintains a single destination register per instruction—a fundamental RISC-V design principle that simplifies hardware implementation by requiring only one write port per vector instruction.
+步长可以为 0，也可以为负。stride=0 时，所有元素地址都相同，在内存值稳定时可用来广播数据。这里还有一个细节：若编码中 `rs2=x0`，ISA 允许少做一些内存访问；若 `rs2` 编号非零、但寄存器数值恰好为 0，则仍须对各活动元素执行访问。固定步长指令不保证元素间的访问顺序，因此 stride=0 的存储不能保证最后一个逻辑元素成为最终值。
 
-The carry-out is stored in the mask register v0. For an add-with-carry instruction (`vadc`), vs2 adds to vs1 plus the mask bit, producing the sum. A separate instruction (`vmadc`) computes the carry-out from the same inputs and writes it to the destination mask register. These instructions must execute in sequence: vadc first, then vmadc. Furthermore, the destination of vadc cannot overlap with vs1 or vs2, because modifying a source operand before vmadc executes would corrupt the carry computation. The CPU is responsible to detect the overlapping of source and destination registers to take illegal instruction exception.
+> **译注：**原文把零步长存储概括为“只存最后一个元素”，这里按规范修正。减少访问次数也不是所有零步长指令都能采用的通用优化。
 
-### 4.2.4 Multiply-Accumulate
+很大或为负的步长可能让一条指令跨越多个物理页和很宽的地址范围。较简单的实现可以限制内部并发访问的范围、分批完成这条指令；软件也可以改用多条标量或向量加载，再通过置换指令整理 VRF 中的数据。
 
-Two multiply-accumulate forms exist. The accumulate form (`vmacc`) computes vd = vd + (vs1 × vs2), adding the product to the existing destination value. The overwriting form (`vmadd`) computes vd = (vd × vs1) + vs2, where the destination is one of the multiplicands. Subtract variants (`vnmsac`, `vnmsub`) negate the product before accumulation. These instructions appear in both integer and floating-point forms.
+![固定步长访存](images/fig4-3-constant-stride.png)
 
-Note: the VMACC instruction requires 3 source operands for accumulation which is the only vector instruction type with 3 source operands. The first time, the destination register is most likely reset to zero before the accumulation. The accumulated result can be localized to the functional unit thus the VMACC instruction requires only 2 source operands like all other instructions.
+**图 4-3　固定步长访存**
 
-### 4.2.5 Merge and Move
+### 4.1.5 索引式 gather/scatter
 
-The merge instruction (`vmerge`) selects between two sources based on mask bits: where the mask is 0, take from vs2; where the mask is 1, take from vs1. Because the mask serves as the selection control, the vm bit must be 0 (masking enabled)—attempting to execute vmerge with vm=1 produces undefined behavior.
+索引操作使用偏移向量访问任意内存位置。对于 gather 加载 `vluxei`、`vloxei`，`vs2` 保存相对于基地址的字节偏移。例如 `vs2[0]=5`，则目的元素 0 取得 `base+5` 的数据；`vs2[1]=8`，则目的元素 1 取得 `base+8` 的数据。各偏移彼此独立，并不是累计增量，也不要求有序。
 
-When vm=1 with the merge encoding, the instruction becomes `vmv` (vector move), copying vs1 to vd unconditionally. The specification requires vs2=v0 for this encoding; other vs2 values are reserved for future extensions.
+scatter 存储 `vsuxei`、`vsoxei` 反向执行同一过程，用相同索引向量决定每个源元素写入哪个内存位置。
 
-When the source is a scalar register or immediate, and the destination differs from the source, the operation becomes a splat—broadcasting the scalar value to all destination elements.
+助记符中的位宽描述索引，而不是数据。例如 SEW=32、LMUL=1 时，`vluxei16.v v4, (a0), v8` 使用 16 位字节偏移、读取 32 位数据。索引 `v8` 的 EMUL=1/2，数据目的 `v4` 的 EMUL=1。
 
-### 4.2.6 Fixed-Point Arithmetic
+![索引式 gather/scatter 访存](images/fig4-4-indexed-gather-scatter.png)
 
-Fixed-point operations support DSP applications that require fractional arithmetic without floating-point hardware. Saturating add and subtract (`vsadd`, `vssub`) clamp results to the representable range rather than wrapping. Averaging add and subtract (`vaadd`, `vasub`) compute (a+b)/2 or (a−b)/2 without overflow, useful for filter implementations.
+**图 4-4　索引式 gather/scatter 访存**
 
-**Fractional Multiply with Rounding.** The `vsmul` instruction performs a signed fractional multiply: multiply two Q-format values, shift right by SEW−1 bits, round according to the vxrm rounding mode, and saturate the result. This implements the common DSP pattern of multiplying two Q15 values to produce a Q15 result. The rounding mode comes from the vxrm CSR (vector fixed-point rounding mode) discussed in Chapter 3.
+有序与无序形式对索引操作影响很大。假设 scatter 的元素 0 写缓存行 A，元素 1 写缓存行 B，元素 2 又写缓存行 A：
 
-**Scaling Shift and Clip.** The clip instructions (`vnclip`, `vnclipu`) perform narrowing with saturation. A double-width source is shifted right by a specified amount, rounded according to vxrm, and clipped to the single-width destination range. Signed clip (`vnclip`) saturates to [−2^(SEW−1), 2^(SEW−1)−1]; unsigned clip (`vnclipu`) saturates to [0, 2^SEW−1]. These operations combine the narrowing shift and saturation that would otherwise require multiple instructions.
+- 有序 scatter 必须按 A、B、A 的元素顺序产生效果，可能导致缓存行来回切换；
+- 无序 scatter 可以先合并或并行处理指向 A 的访问，再处理 B，从而提高效率，但不提供相同的严格元素顺序保证。
 
-### 4.2.7 Floating-Point Arithmetic
+索引值可能覆盖很大的地址范围，简单实现可以限制内部并发处理的页数或请求数，再分批推进。若所有目标数据都位于可安全读取的连续区域，可以考虑先单位步长加载，再在寄存器中重排。存储方向更需谨慎：地址空洞、重复索引、访问顺序和额外写入，都可能使“重排后连续存储”不再等价。
 
-Floating-point operations parallel the integer set: add, subtract, multiply, divide, square root, min, max, and comparisons. Fused multiply-add operations (`vfmacc`, `vfnmacc`, `vfmsac`, `vfnmsac`, `vfmadd`, `vfnmadd`, `vfmsub`, `vfnmsub`) perform the multiply and add/subtract with a single rounding, improving precision. Conversion instructions translate between floating-point and integer formats, and between different floating-point widths.
+### 4.1.6 分段访存
 
-The complete set of floating-point instructions includes:
+分段操作把内存中交错排列的多个字段加载到连续向量寄存器组，或执行相反的交错存储。字段数记为 `NFIELDS`，指令编码满足 `NFIELDS = nf + 1`。例如 NFIELDS=4、每字段 EMUL=1 时，四个字段分别进入四个目的寄存器；下一个结构的四个字段则进入这些寄存器各自的下一个元素位置。
 
-- Vector FP Add, Subtract, Reverse Subtract (including Double Width)
-- Vector FP Multiply (including Double Width)
-- Vector FP Divide, Reverse Divide
-- Vector FP Multiply-Add/Sub, Multiply-Accumulate (including Double Width)
-- Vector FP Square-Root, Reciprocal Square-Root Estimate, Reciprocal Estimate
-- Vector FP Comparison Instructions
-- Vector FP Min/Max Instructions
-- Vector FP Merge, Move Instructions
-- Vector FP Sign-Injection Instructions
-- Vector FP Classify Instructions
-- Vector FP/Integer Type-Convert (including Double Width and Narrowing)
+这种指令很适合 AoS（array of structures，结构体数组）布局。假设 RGB 像素由三个连续字节组成，NFIELDS=3 的分段加载可以把数据拆成三个向量。在 SEW=8、LMUL=1、无掩码的例子中，所有 R 值进入 `v0`，G 值进入 `v1`，B 值进入 `v2`，随后分别处理三个颜色通道。
 
-### 4.2.8 Reduction Operations
+![RGB 分段加载：AoS 转 SoA](images/fig4-5-segment-load-rgb.png)
 
-Reduction operations combine all elements of a vector into a single scalar result. Integer reductions include sum (`vredsum`), min/max (`vredmin`, `vredmax`, `vredminu`, `vredmaxu`), and logical reductions (`vredand`, `vredor`, `vredxor`). Floating-point reductions include sum (`vfredusum`, `vfredosum`), min, and max.
+**图 4-5　三字段分段加载：从 AoS 转换为 SoA**
 
-![Reduction Operation Datapath](fig4-15-reduction-datapath.png)
+> **译注：**原文和原图把字段数简写为 `nf`，容易与指令编码混淆。RGB 的 NFIELDS=3，对应编码 `nf=2`；四字段的 NFIELDS=4，对应 `nf=3`。原图保留，编码含义以本说明为准。
 
-**Fig. 4-15.** Reduction Operation Datapath
+`vlseg3e8.v` 每组读取 R、G、B 三个 8 位字段，并分别解交错到三个向量寄存器。一条指令替代三条独立固定步长加载，并为硬件统一优化访问提供机会。
 
-The functional units can be reused for Tree-Based Folding Reduction Sum, which is a blocking operation for N cycles where the same functional unit is used in every cycle until the Tree-Based Folding Reduction Sum is produced. Depending on the application, additional functional units can be added for pipelined operation where the throughput is 1 instead of blocking.
+分段操作也可以用多条固定步长指令等价表达，但单指令形式既减少指令数，也允许硬件更好地合并内存访问。
 
-An efficient approach to unordered reduction uses a folding algorithm. The tree-structured implementation adds pairs of elements in parallel: the first half of the vector adds to the second half, producing a half-length intermediate; this repeats until one element remains in the destination register. With 16 elements and single-cycle integer addition, the reduction completes in 4 cycles (log₂16). Floating-point addition with 3-cycle latency requires 12 cycles. The ordered reduction cannot parallelize—16 elements with 3-cycle floating-point latency requires 48 cycles where only a single floating-point unit is used.
+![NF=4 的单位步长分段加载](images/fig4-6a-segment-load-nf4.png)
 
-![Reduction Sum Implementation](fig4-16-reduction-sum.png)
+![NF=4 的单位步长分段存储](images/fig4-6b-segment-store-nf4.png)
 
-**Fig. 4-16.** Reduction Sum Implementation
+**图 4-6　NF=4 的单位步长分段加载/存储**
 
-Note that the reduction sum instruction is particularly necessary for large matrix multiplication operations where accumulation of all A and B elements is reduced to a single C element.
+![固定步长分段加载/存储](images/fig4-7-segment-strided.png)
+
+**图 4-7　固定步长分段加载/存储**
+
+![索引式分段加载/存储](images/fig4-8-segment-indexed.png)
+
+**图 4-8　索引式分段加载/存储**
+
+每个字段的寄存器分组由数据 EMUL 决定。例如 EMUL=2、NFIELDS=4、目的从 `v0` 开始时，四个字段依次占 `v0`～`v1`、`v2`～`v3`、`v4`～`v5`、`v6`～`v7`。每组分别按 EMUL 对齐，不要求首组按整个八寄存器区域对齐。还必须满足 `EMUL × NFIELDS ≤ 8`，且寄存器编号不能越过 `v31`；EMUL<1 时，每个字段仍使用独立寄存器名称。
+
+分段指令中的 VL 表示段数，掩码也按整段生效。有序索引分段访存保证段与段之间的顺序，但同一段内部各字段的访问仍是无序的。不同索引可以指向重叠地址，软件不能忽略相应的顺序语义。
+
+从实现角度看，分段访存结合了固定步长与索引访存的特征，因此也面临跨页范围、地址窗口和存储体冲突等复杂度问题。
+
+### 4.1.7 应用：矩阵乘法
+
+分段加载和索引加载可以配合表达矩阵乘法。例如，把矩阵 B 的若干列装入不同向量寄存器，再通过适当的加载或广播方式准备矩阵 A 的一行；随后执行逐元素乘法，并用归约指令得到点积。实际高性能内核通常还要结合矩阵布局、缓存分块和寄存器复用进一步优化。
+
+![使用向量操作执行矩阵乘法](images/fig4-9-matrix-multiplication.png)
+
+**图 4-9　使用向量操作执行矩阵乘法**
 
 ---
 
-## 4.3 Mask Operations
+## 4.2 计算操作
 
-Mask operations manipulate the single-bit-per-element mask values stored in vector registers. Each element, regardless of SEW, corresponds to one mask bit. Logical operations (`vmand`, `vmnand`, `vmor`, `vmnor`, `vmxor`, `vmxnor`) combine two mask vectors. These instructions ignore LMUL since mask data always fits in a single register.
+计算指令对向量元素执行算术、逻辑和比较。整数指令中有向量-向量、向量-标量和向量-立即数形式，但并非每种操作都提供全部形式。浮点指令主要采用向量-向量和向量-标量形式，不直接编码一般浮点立即数。
 
-The complete set of mask operations includes:
+![计算指令分类](images/fig4-10-compute-categories.png)
 
-- Vector Mask-Register Logical Instructions: AND, NAND, AND-NOT, OR, NOR, OR-NOT, XOR, XNOR
-- Vector mask population count (`vcpop`)
-- `vfirst` find-first-set mask bit
-- `vmsbf.m` set-before-first mask bit
-- `vmsif.m` set-including-first mask bit
-- `vmsof.m` set-only-first mask bit
-- Vector Iota Instruction
-- Vector Element Index Instruction
+**图 4-10　计算指令分类**
 
-Special encodings of the logical instructions provide common primitives:
+计算指令使用共同的 `OP-V` 主操作码，再由功能字段划分类别。OPI、OPF、OPM 是编码类别，其中 OPM 不只有掩码逻辑，也包含整数乘除、归约等操作。以下是说明操作数关系的通用写法，不是可直接汇编的指令清单。
 
-```
-vmmv.m  = vmand.mm vd, vs, vs   // copy mask register
-vmclr.m = vmxor.mm vd, vd, vd   // clear mask register
-vmset.m = vmxnor.mm vd, vd, vd  // set mask register
-vmnot.m = vmnand.mm vd, vs, vs  // invert mask bits
+```text
+vop.vv vd, vs2, vs1, vm    // 向量-向量：vd[i]=vs2[i] op vs1[i]
+vop.vx vd, vs2, rs1, vm    // 向量-标量：vd[i]=vs2[i] op x[rs1]
+vop.vi vd, vs2, imm, vm    // 向量-立即数：vd[i]=vs2[i] op imm
+vfop.vv vd, vs2, vs1, vm   // 浮点向量-向量
+vfop.vf vd, vs2, rs1, vm   // 浮点向量-标量：标量来自 f[rs1]
 ```
 
-**Mask Queries.** Several instructions extract information from masks. `vcpop` counts the number of set bits (population count). `vfirst` returns the index of the first set bit, or −1 if all bits are clear. `vmsbf` (set-before-first) sets all bits before the first set bit. `vmsif` (set-including-first) sets all bits up to and including the first set bit. `vmsof` (set-only-first) sets only the first set bit. `viota` computes a prefix sum of the mask bits, useful for computing scatter indices for compression operations.
+![计算指令编码](images/fig4-11-compute-encoding.png)
 
-![Mask Query Operations (vmsbf, vmsif, vmsof, viota)](fig4-17-mask-query.png)
+**图 4-11　计算指令编码格式**
 
-**Fig. 4-17.** Mask Query Operations (vmsbf, vmsif, vmsof, viota)
+### 4.2.1 加宽操作
 
-Given input mask vs2 with the first set bit at index [3]: `vmsbf.m` (set-before-first) sets all bits before the first 1; `vmsif.m` (set-including-first) sets all bits up to and including the first 1; `vmsof.m` (set-only-first) sets only the first 1 bit. These operations enable efficient loop termination detection and prefix computations.
+加宽操作产生位宽为输入两倍的结果，助记符中的 `w` 表示 widening。主要有两种形式：两个单宽源产生双宽结果 `vwop.vv`，以及一个源已经为双宽的混合宽度形式 `vwop.wv`。
+
+```text
+vwop.v{v,x} vd, vs2, vs1/rs1   // 2*SEW = 扩展(SEW) op 扩展(SEW)
+vwop.w{v,x} vd, vs2, vs1/rs1   // 2*SEW = 2*SEW op 扩展(SEW)
+vfwop.v{v,f} vd, vs2, vs1/rs1  // 浮点：2*SEW = SEW op SEW
+vfwop.w{v,f} vd, vs2, vs1/rs1  // 浮点：2*SEW = 2*SEW op SEW
+```
+
+整数 ALU 加宽与整数乘法的实现有所不同。加、减等 ALU 操作先把两个源符号扩展或零扩展到双宽，再执行双宽运算并写回双宽结果。
+
+![加宽整数加法](images/fig4-12a-widening-add.png)
+
+![加宽整数减法](images/fig4-12b-widening-sub.png)
+
+**图 4-12　加宽整数加减法**
+
+整数加宽乘法直接保留完整乘积，例如 16×16 位乘法得到 32 位结果。浮点加宽运算则先把输入提升到较宽格式，再按目标格式的语义完成计算和舍入。
+
+![加宽乘法 vwmul](images/fig4-13a-widening-mul.png)
+
+![无符号加宽乘法 vwmulu](images/fig4-13b-widening-mulu.png)
+
+**图 4-13　加宽乘法**
+
+在一种 VLEN 粒度实现中，LMUL=1 的加宽结果占两个连续向量寄存器。处理器可以拆成两个微操作，分别处理源元素的两部分并写入目的寄存器组的相应区域；两个微操作可以顺序执行，也可以流水化。
+
+**纯扩展指令。**`vzext` 和 `vsext` 只做零扩展或符号扩展，提供 `.vf2`、`.vf4`、`.vf8` 三种倍数。目的 EEW=SEW、目的 EMUL=LMUL；源 EEW 和 EMUL 则分别除以该倍数。源位宽必须受支持，源 EMUL 也不能低于实现支持的最小分数 LMUL。
+
+> **译注：**例如 SEW=32 时，`.vf4` 是把 8 位扩展到 32 位，而不是把 32 位扩展到 128 位；`.vf8` 会要求 4 位源元素，RVV 1.0 不支持。原文的扩展倍数说明在此按规范澄清。
+
+### 4.2.2 窄化操作
+
+窄化操作把双宽源缩减为单宽结果，包括逻辑/算术右移以及后文的定点 clip。源操作数占用更宽寄存器组，结果则落入较窄的目的寄存器组。
+
+典型流程是：加载两组 16 位数据，执行加宽加法得到 32 位结果，再用窄化右移把结果压回 16 位。这在定点 DSP 中很常见。
+
+![窄化移位](images/fig4-14-narrowing-shift.png)
+
+**图 4-14　窄化移位操作**
+
+在硬件中，窄化可以按数据块逐步完成：读取双宽源的一部分，完成移位、舍入或截断后写入较窄的目的区域，再继续处理后续数据。
+
+### 4.2.3 整数算术
+
+标准整数操作包括：加、减、AND/OR/XOR，逻辑左移、逻辑右移、算术右移，有符号和无符号的等于、不等、小于、小于等于、大于、大于等于比较，以及 min/max、乘法、除法和余数。
+
+完整类别包括：
+
+- 向量整数加、减、反向减，包括双宽形式；
+- 向量整数扩展；
+- 带进位加与带借位减；
+- 向量位逻辑；
+- 向量移位，包括窄化移位；
+- 向量整数比较，向目的掩码写入 1/0；
+- 有符号/无符号 min/max；
+- 整数乘法，包括双宽形式；
+- 整数除法与余数；
+- 乘加/乘减和乘累加，包括双宽形式；
+- merge 与 move。
+
+**进位与借位。**多精度算术需要处理进位和借位。RVV 分别提供产生普通算术结果和产生进位输出的指令，每条只写自己的目的操作数。它们按元素计算，不会自动把元素 i 的进位串到元素 i+1；多字整数各部分之间的进位传递仍由软件组织。
+
+`vadc` 对 `vs2`、`vs1` 和 `v0` 中对应的进位输入求和；带进位输入的 `vmadc` 对相同输入产生进位输出，并写入目的掩码寄存器。软件安排二者顺序时，必须保留仍需使用的数据和进位输入，不能让前一条先覆盖后一条所需的源。
+
+> **译注：**原文把这种跨指令的数据保护写成了硬件非法重叠检查，还规定必须先执行 `vadc`。这并不准确：两条指令可按依赖关系安排顺序；合法指令覆盖了后续计算所需的数据，属于软件逻辑错误，硬件不会据此自动报非法指令。单条指令自身的寄存器重叠限制则另按规范判断。
+
+### 4.2.4 乘累加
+
+乘累加有两类主要操作数排列：
+
+- 累加形式 `vmacc`：`vd = vd + (vs1 × vs2)`；
+- 覆盖式乘加 `vmadd`：`vd = (vd × vs1) + vs2`，其中旧 `vd` 是乘数之一。
+
+`vnmsac`、`vnmsub` 等变体改变乘积或加减号；整数和浮点均有相应形式。
+
+从体系结构看，`vmacc` 需要读取旧 `vd`、`vs1` 和 `vs2`，因此有三个逻辑源。某些微架构可以通过旁路或局部累加路径复用刚产生的累加结果，减少连续相关操作反复访问 VRF 的压力；但跨指令保留结果的方式必须维持 ISA 可见的数据相关与异常语义。
+
+### 4.2.5 Merge 与 Move
+
+`vmerge` 根据掩码位在两个数据源之间选择：掩码为 0 时取 `vs2`，为 1 时取另一个向量、标量或立即数源。由于掩码本身承担选择控制，merge 使用特定的 `vm=0` 编码形式。
+
+同一编码空间在 `vm=1` 且 `vs2=v0` 时用于 `vmv`，把源复制到 VL 和 `vstart` 指定的目的范围；其他 `vs2` 编码保留。源为标量寄存器或立即数时，move 会把该值广播到各目的元素，即 splat。
+
+### 4.2.6 定点算术
+
+定点操作面向不使用浮点硬件、但需要小数运算的 DSP 应用。
+
+- 饱和加减 `vsadd`、`vssub` 把溢出结果钳位到可表示范围，而不是模回绕；
+- 平均加减 `vaadd`、`vasub` 计算带舍入的 `(a+b)/2` 或 `(a-b)/2`，避免中间和溢出，适合滤波器。
+
+**带舍入的分数乘法。**`vsmul` 执行有符号分数乘法：两个 Q 格式数相乘，右移 `SEW-1` 位，按照 `vxrm` 舍入模式舍入，并对结果饱和。例如两个 Q15 相乘得到 Q15 结果。
+
+**缩放移位与 clip。**`vnclip`、`vnclipu` 把双宽源右移指定距离，按 `vxrm` 舍入，再饱和到单宽目的范围：
+
+- 有符号 `vnclip` 饱和到 `[-2^(SEW-1), 2^(SEW-1)-1]`；
+- 无符号 `vnclipu` 饱和到 `[0, 2^SEW-1]`。
+
+它把原本需要多条指令的窄化移位、舍入和饱和合并为一次操作。
+
+### 4.2.7 浮点算术
+
+浮点操作与整数类别大体对应，包括加、减、乘、除、平方根、min/max 和比较。融合乘加指令 `vfmacc`、`vfnmacc`、`vfmsac`、`vfnmsac`、`vfmadd`、`vfnmadd`、`vfmsub`、`vfnmsub` 只在最终结果处进行一次舍入，因此比拆分的乘法和加法具有更好的数值精度。
+
+浮点指令主要包括：
+
+- 浮点加、减、反向减及加宽形式；
+- 浮点乘法及加宽形式；
+- 除法与反向除法；
+- 乘加/乘减和乘累加及加宽形式；
+- 平方根、倒数平方根估计和倒数估计；
+- 浮点比较；
+- min/max；
+- merge 与 move；
+- 符号注入；
+- 浮点分类；
+- 浮点与整数之间、不同浮点宽度之间的转换，包括加宽和窄化。
+
+### 4.2.8 归约操作
+
+归约把源向量中的活动元素与初始值 `vs1[0]` 合并，结果写入 `vd[0]`。这里的“标量结果”仍位于向量寄存器的元素 0，并非直接写入整数或浮点标量寄存器。整数归约包括：
+
+- 求和 `vredsum`；
+- 有符号/无符号 min/max：`vredmin`、`vredmax`、`vredminu`、`vredmaxu`；
+- 逻辑归约：`vredand`、`vredor`、`vredxor`。
+
+浮点归约包括有序/无序求和 `vfredosum`、`vfredusum` 以及 min/max。
+
+![归约数据通路](images/fig4-15-reduction-datapath.png)
+
+**图 4-15　归约操作数据通路**
+
+实现可以复用普通功能单元，分多轮完成树形归约。这样做面积较省，却会让同一功能单元连续多个周期被归约占用；若目标应用高度依赖归约，也可以加入专用或流水化归约硬件来提高吞吐率。
+
+无序求和可以采用树形算法：先将元素两两相加，每层把待归约数量减半，直到剩下一个结果。仅考虑 16 个输入的树，深度为 `log2(16)=4`。若每级加法延迟为 1 周期，理想依赖路径为 4 周期；若为 3 周期，则为 12 周期。这里还没有计入初始值 `vs1[0]` 的合并、数据搬运和资源复用开销，不能直接当作 RVV 归约指令的总延迟。
+
+有序浮点求和则从 `vs1[0]` 开始，按元素顺序累加。16 个活动元素意味着 16 次依赖相加，在每次加法延迟为 3 周期的简单实现中，对应 48 周期的依赖链。VL=0 时，归约连 `vd[0]` 也不更新；VL>0 但所有源元素被屏蔽时，则按具体归约指令对初始值的规定处理。
+
+> **译注：**原文的树深度例子省略了归约初始值，这里补上计数边界。有序与无序描述的是允许的数值计算顺序，不只是调度策略；浮点无序归约也必须遵守规范规定的运算树和舍入约束。
+
+![归约求和实现](images/fig4-16-reduction-sum.png)
+
+**图 4-16　归约求和实现**
+
+按点积方式实现矩阵乘法时，归约可以把一行与一列的逐元素乘积汇总为 C 的一个元素。采用外积式分块的实现则可以让向量各元素分别累加不同的 C 元素，不一定需要显式横向归约。
 
 ---
 
-## 4.4 Permutation Operations
+## 4.3 掩码操作
 
-Permutation operations rearrange elements within or across vector registers. These include scalar element extraction/insertion, sliding, gathering, and compression.
+掩码操作处理向量寄存器中逐元素的一位掩码值。无论当前 SEW 是多少，每个逻辑元素都对应一个掩码位。`vmand`、`vmnand`、`vmor`、`vmnor`、`vmxor`、`vmxnor` 等逻辑指令组合两个掩码向量。掩码数据按位紧凑存储，其寄存器占用规则不同于普通数据向量。
 
-### 4.4.1 Scalar Moves
+主要掩码操作包括：
 
-The `vmv.x.s` and `vmv.s.x` instructions move element 0 between a vector register and an integer scalar register. Similarly, `vfmv.f.s` and `vfmv.s.f` handle floating-point transfers. These provide the interface between vector and scalar execution, extracting reduction results or inserting scalar values for broadcast operations.
+- AND、NAND、AND-NOT、OR、NOR、OR-NOT、XOR、XNOR；
+- 掩码置位计数 `vcpop`；
+- 查找第一个置位 bit 的 `vfirst`；
+- 第一个置位之前置位 `vmsbf.m`；
+- 置位到并包含第一个置位 `vmsif.m`；
+- 只保留第一个置位 `vmsof.m`；
+- 向量 iota 前缀计数；
+- 向量元素索引生成。
 
-### 4.4.2 Slide Operations
+逻辑指令的特殊编码可以构成常用操作：
 
-Slide operations shift elements up or down within a vector register. `vslideup.vi/vx` moves elements to higher indices: with an offset of 3, element 0 moves to position 3, element 1 to position 4, and so forth. Positions 0, 1, and 2 receive their values based on the tail agnostic (ta) setting—either unchanged or filled with all-ones. `vslidedown.vi/vx` moves elements to lower indices: with an offset of 3, element 3 moves to position 0, element 4 to position 1. Upper positions receive zeros.
-
-```
-vslide1up.vx vd, vs2, rs1, vm    // vd[0]=x[rs1], vd[i+1] = vs2[i]
-vslideup.vx vd, vs2, rs1, vm     // vd[i+rs1] = vs2[i]
-vslideup.vi vd, vs2, uimm, vm    // vd[i+uimm] = vs2[i]
-vslide1down.vx vd, vs2, rs1, vm  // vd[i] = vs2[i+1], vd[vl-1]=x[rs1]
-vslidedown.vx vd, vs2, rs1, vm   // vd[i] = vs2[i+rs1]
-vslidedown.vi vd, vs2, uimm, vm  // vd[i] = vs2[i+uimm]
-```
-
-The slide-by-one variants (`vslide1up`, `vslide1down`) incorporate a scalar value. For vslide1up, all elements shift up by one position, and the scalar from rs1 fills element 0. For vslide1down, elements shift down by one, and the scalar fills the highest position. These enable efficient insertion of scalars into vectors for pipelined processing.
-
-![Slideup Operations (vslideup)](fig4-18a-slideup.png)
-
-![Slideup Operations (vslide1up)](fig4-18b-slide1up.png)
-
-![Slideup Operations (vslideup.vi)](fig4-18c-slideup-vi.png)
-
-**Fig. 4-18.** Slideup Operations (vslideup, vslide1up)
-
-![Slidedown Operations (vslidedown)](fig4-19a-slidedown.png)
-
-![Slidedown Operations (vslide1down)](fig4-19b-slide1down.png)
-
-![Slidedown Operations (vslidedown.vi)](fig4-19c-slidedown-vi.png)
-
-**Fig. 4-19.** Slidedown Operations (vslidedown, vslide1down)
-
-### 4.4.3 Gather Operations
-
-The `vrgather` instruction performs arbitrary element permutation within a vector register. An index vector (vs1) specifies, for each destination position, which source element (from vs2) to copy. If vs1[0]=5, then vs2[5] becomes vd[0]. If vs1[1]=7, then vs2[7] becomes vd[1]. The indices need not be unique or ordered.
-
-```
-vrgather.vv vd, vs2, vs1, vm      // vd[i] = vs2[vs1[i]]
-vrgatherei16.vv vd, vs2, vs1, vm  // vd[i] = vs2[vs1[i]], vs1 is 16b
-vrgather.vx vd, vs2, rs1, vm      // vd[i] = vs2[rs1]
-vrgather.vi vd, vs2, uimm, vm     // vd[i] = vs2[uimm]
+```text
+vmmv.m  = vmand.mm vd, vs, vs   // 复制掩码
+vmclr.m = vmxor.mm vd, vd, vd   // 清零掩码
+vmset.m = vmxnor.mm vd, vd, vd  // 全部置位
+vmnot.m = vmnand.mm vd, vs, vs  // 按位取反
 ```
 
-The `vrgather.vx` and `vrgather.vi` instructions copy the same element from vs2 to all elements of destination vector register.
+**掩码查询。**`vcpop` 统计参与操作的置位数量；`vfirst` 返回第一个参与操作的 1 的索引，若不存在则返回 -1；`vmsbf`、`vmsif`、`vmsof` 根据首个 1 的位置生成掩码。`viota` 计算不包含当前位置的前缀计数，可用于生成压缩后的目的索引。例如在无掩码、VL=4 时，输入 `[1,0,1,1]` 得到 `[0,1,1,2]`。
 
-This instruction can replace indexed loads in some algorithms. Load data with a unit-stride operation, then use vrgather to rearrange elements. When the permutation pattern is known at compile time, this approach may outperform indexed memory access, particularly if the data is already cache-resident.
+![掩码查询操作](images/fig4-17-mask-query.png)
 
-![Gather Operation (vrgather.vv)](fig4-20-vrgather.png)
+**图 4-17　`vmsbf`、`vmsif`、`vmsof` 与 `viota`**
 
-**Fig. 4-20.** Gather Operation (vrgather.vv)
+假设输入掩码 `vs2` 的第一个 1 位于索引 3：`vmsbf.m` 设置索引 3 之前的所有位，`vmsif.m` 设置索引 0～3，`vmsof.m` 只设置索引 3。这些操作适合循环终止检测和前缀计算。
 
-The vrgather instruction performs arbitrary element permutation. The index vector vs1 specifies which element from source vector vs2 to place at each destination position. Here, vs1 = [3, 0, 2, 1, 7, 4, 6, 5] gathers elements from vs2 = [A, B, C, D, E, F, G, H] producing vd = [D, A, C, B, H, E, G, F]. Indices may repeat (duplicating elements) or omit values (discarding elements).
+---
+
+## 4.4 置换操作
+
+置换操作在向量寄存器内部或寄存器之间重排元素，包括标量元素提取/插入、slide、gather 和 compress。
+
+### 4.4.1 标量移动
+
+`vmv.x.s` 和 `vmv.s.x` 在向量寄存器元素 0 与整数标量寄存器之间搬运数据；`vfmv.f.s` 和 `vfmv.s.f` 处理浮点标量传输。它们构成标量与向量执行的接口，可用于提取归约结果或插入标量值。
+
+### 4.4.2 Slide 操作
+
+slide 在向量内部按索引方向移动元素：
+
+- `vslideup.vi/vx` 把元素移向更高索引。例如 offset=3 时，源元素 0 进入目的位置 3，源元素 1 进入位置 4；索引低于 offset 的目的元素不由该操作写入，保持原值；
+- `vslidedown.vi/vx` 把元素移向更低索引。例如 offset=3 时，源元素 3 进入目的位置 0，源元素 4 进入位置 1；只有源索引不小于 VLMAX 时才读取为 0。源索引若位于当前 VL 之外、但仍小于 VLMAX，读取的仍是对应寄存器元素，因此不能笼统地把当前活动范围之外都视为 0。
+
+```text
+vslide1up.vx vd, vs2, rs1, vm    // vd[0]=x[rs1], vd[i+1]=vs2[i]
+vslideup.vx vd, vs2, rs1, vm     // vd[i+x[rs1]]=vs2[i]
+vslideup.vi vd, vs2, uimm, vm    // vd[i+uimm]=vs2[i]
+vslide1down.vx vd, vs2, rs1, vm  // vd[i]=vs2[i+1], vd[vl-1]=x[rs1]
+vslidedown.vx vd, vs2, rs1, vm   // vd[i]=vs2[i+x[rs1]]
+vslidedown.vi vd, vs2, uimm, vm  // vd[i]=vs2[i+uimm]
+```
+
+以上是忽略掩码等边界条件的索引关系。`vslide1up` 向高索引移动一位，并用 `x[rs1]` 填入目的元素 0；`vslide1down` 向低索引移动一位，把标量填入目的位置 `VL-1`。这些写入仍受 `vstart` 和掩码约束，并不是无条件修改整个寄存器。
+
+> **译注：**原文对普通 slide 的空缺位置作了简化。`vslideup` 不修改起始偏移之前的主体元素；`vslidedown` 则以 VLMAX 而非 VL 判断源索引是否越界，不能把所有“高端空位”都理解为补零。
+
+![vslideup](images/fig4-18a-slideup.png)
+
+![vslide1up](images/fig4-18b-slide1up.png)
+
+![vslideup.vi](images/fig4-18c-slideup-vi.png)
+
+**图 4-18　`vslideup` 与 `vslide1up`**
+
+![vslidedown](images/fig4-19a-slidedown.png)
+
+![vslide1down](images/fig4-19b-slide1down.png)
+
+![vslidedown.vi](images/fig4-19c-slidedown-vi.png)
+
+**图 4-19　`vslidedown` 与 `vslide1down`**
+
+### 4.4.3 Gather 操作
+
+`vrgather` 根据索引向量在寄存器中重排元素。`vs1` 为每个目的位置指定要从 `vs2` 读取的源元素：例如 `vs1[0]=5` 时，`vd[0]=vs2[5]`。索引既不要求唯一，也不要求有序。
+
+```text
+vrgather.vv vd, vs2, vs1, vm      // vd[i]=vs2[vs1[i]]
+vrgatherei16.vv vd, vs2, vs1, vm  // 索引元素固定为 16 位
+vrgather.vx vd, vs2, rs1, vm      // vd[i]=vs2[x[rs1]]
+vrgather.vi vd, vs2, uimm, vm     // vd[i]=vs2[uimm]
+```
+
+`vrgather.vx` 和 `vrgather.vi` 把同一个源元素广播到全部活动目的元素。
+
+所有形式都以 VLMAX 判断源索引边界：索引小于 VLMAX 时可以读取对应源元素，即使其索引不小于当前 VL；索引不小于 VLMAX 时结果为 0。目的更新仍受 VL、`vstart` 和掩码限制。
+
+某些算法可以用“单位步长加载 + `vrgather`”替代索引加载。前提是需要的数据能装入可索引的源寄存器范围，额外读取的连续区域也安全，且访问语义等价。在这些条件下，规则访存加寄存器重排可能更高效。
+
+![vrgather.vv](images/fig4-20-vrgather.png)
+
+**图 4-20　`vrgather.vv`**
+
+例如索引 `vs1=[3,0,2,1,7,4,6,5]`、源 `vs2=[A,B,C,D,E,F,G,H]`，结果为 `vd=[D,A,C,B,H,E,G,F]`。索引可以重复以复制元素，也可以省略某些索引以丢弃元素。
 
 ### 4.4.4 Compress
 
-The `vcompress` instruction packs selected elements to the beginning of the destination vector. A mask vector selects which source elements to keep: where the mask bit is 1, copy the source element to the next available destination position; where 0, skip the source element. If the mask is [1,0,0,1,1,0,1,0] and the source contains [A,B,C,D,E,F,G,H], the result is [A,D,E,G,?,?,?,?], with don't-care values in the upper positions.
+`vcompress` 把掩码选中的源元素紧凑排列到目的向量低端。掩码位为 1 时复制对应源元素到下一个可用目的位置，为 0 时跳过。例如掩码 `[1,0,0,1,1,0,1,0]`、源 `[A,B,C,D,E,F,G,H]`，低端有效结果为 `[A,D,E,G]`，其余位置按尾部策略处理。
 
-![Compress Operation (vcompress)](fig4-21-vcompress.png)
+![vcompress](images/fig4-21-vcompress.png)
 
-**Fig. 4-21.** Compress Operation (vcompress)
+**图 4-21　`vcompress`**
 
-Despite its conceptual simplicity, compress is challenging to implement efficiently. For a 512-element vector (LMUL=8 with 8-bit elements), determining the destination position of each element requires prefix-sum computation across all mask bits, and the data routing network must handle arbitrary compression ratios.
+压缩的语义很直观，硬件实现却不轻松。若一次涉及 512 个元素，就要对全部掩码位计算前缀计数，为每个保留元素确定新的目的位置；数据路由网络还必须应对各种疏密程度。
 
-### 4.4.5 Whole Register Move
+### 4.4.5 整寄存器移动
 
-The `vmv<nr>r` instructions copy one, two, four, or eight consecutive registers from one location to another. Like whole register load/store, these operations ignore vtype and vl settings, transferring complete register contents. The primary use is register allocation flexibility—copying register groups to avoid data hazards or to position operands for subsequent instructions that require specific register alignments.
+`vmv<nr>r.v` 复制一个、两个、四个或八个连续的完整寄存器，源、目的起始编号须按寄存器数量对齐。它不按当前 VL 限定搬运长度，也不按当前 LMUL 决定分组大小，常用于调整寄存器分配或满足后续操作的对齐要求。
+
+> **译注：**原文称其完全忽略 `vtype`，不够准确。该指令按 EEW=SEW、EMUL=寄存器数量解释操作，有效长度 `evl = 寄存器数量 × VLEN / SEW`，并按 `vstart` 与 evl 判断执行范围；`vstart=0` 时搬运完整寄存器内容。
 
 ---
 
-## 4.5 Summary
+## 4.5 小结
 
-The RISC-V Vector Extension provides a comprehensive instruction set covering memory access, computation, and data permutation. Memory operations support unit-stride, constant-stride, indexed, and segmented access patterns with flexible element widths. Compute operations span integer, floating-point, and fixed-point domains with widening and narrowing variants. Permutation operations enable the data rearrangement required for complex algorithms.
+RISC-V 向量扩展提供了覆盖访存、计算、掩码和数据置换的完整指令体系。访存支持单位步长、固定步长、索引和分段模式；计算覆盖整数、浮点和定点，并提供加宽与窄化变体；置换操作则为复杂算法提供所需的数据重排能力。
 
-Several design principles emerge from this instruction set. First, each instruction writes to at most one destination register (or register group), simplifying hardware implementation. Second, the effective LMUL mechanism enables mixed-precision computation without requiring separate instructions for each width combination. Third, ordered and unordered variants of memory and reduction operations let software choose between strict semantics and performance. Fourth, mask operations are first-class citizens with dedicated instructions rather than special cases of other operations.
+从这些指令可以看到几项设计原则：
 
-Chapter 5 examines how these instructions combine in practical algorithms, with complete worked examples demonstrating strip-mining, mixed-precision computation, and efficient memory access patterns.
+1. 普通算术指令尽量采用单目的操作数，便于控制写回复杂度；分段加载、配置指令等不能简单归入这一概括；
+2. EMUL 机制支持混合精度，而无需为每一种宽度组合建立完全独立的指令体系；
+3. 访存和浮点归约提供有序/无序形式，让软件在严格语义与性能之间选择；
+4. 掩码不仅能控制其他指令，也有自己的逻辑运算和查询指令。
 
+第 5 章将以矩阵乘法和乘累加流水线为例，讨论这些指令如何配合，以及数据布局、访存和调度如何影响性能。
+
+
+---
+
+## 支持原作与反馈
+
+*译者附记*
+
+**如果这篇内容对你有帮助，欢迎访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并向原作者分享你的阅读反馈。** 这是作者在授权交流中特别提出的期待，也是支持这份教程继续完善的一种方式。
+
+反馈不必很长：哪一章最有帮助、哪个概念仍不清楚、希望增加哪些算例，都值得告诉作者。作者不阅读中文，建议使用简短英文，并注明来自 *RISC-V Vector Primer* 中文译本。
+
+中文翻译的用词、错漏或排版问题，请在译文评论区或中文译稿仓库反馈，由译者跟进；不要将译文中的问题视为原作者已经审定的内容。

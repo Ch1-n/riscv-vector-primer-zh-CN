@@ -1,173 +1,219 @@
-# Chapter 5: Matrix Computation and Performance Analysis with the RISC-V Vector Extension
+# 第 5 章：RISC-V 向量扩展中的矩阵计算与性能分析
 
-The preceding chapter established the architectural foundations of the RISC-V Vector Extension, introducing its scalable execution model, register organization, and instruction semantics. Building on that foundation, this chapter moves from architectural principles to concrete execution, demonstrating how vector instructions translate into real performance through representative computational workloads.
+> 本文是 *RISC-V Vector Primer* 的非官方中文译文，经原作者邮件许可，用于非商业技术教育。
+>
+> 原作者：Thang Minh Tran、Paul Miller；编辑：Jonah McLeod；出版方：Simplex Micro。中文翻译：Ch'in。
+>
+> [英文原作](https://github.com/simplex-micro/riscv-vector-primer) · 依据版本：`fc66957a6458842beeabe9d85065ff334ccbd333`（2026-07-25）。授权摘要及译注原则见[翻译说明](TRANSLATION-NOTICE.md)。原作者未审校中文译文。
+>
+> **支持原作：**作者特别欢迎中文读者访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并分享阅读反馈与改进建议。文末附有反馈说明。
 
----
-
-## 5.1 Introduction
-
-This chapter concludes the technical exploration of the RISC-V Vector Extension by examining representative computation examples and their performance behavior. The goal is to show how scalable vector length, vector register grouping, chaining, gather and permutation operations, and flexible memory access modes combine to deliver high throughput while keeping software portable across implementations.
-
-The discussion centers on two workloads that frequently appear in real systems. The first is single-precision floating-point matrix multiplication, which stresses both arithmetic intensity and memory layout. The second is a low-precision multiply-accumulate loop, a common pattern in signal processing and machine learning inference where load, widening, conversion, and fused arithmetic occur in a tight pipeline.
-
----
-
-## 5.2 Terminology and Architectural Context
-
-To keep the analysis consistent with the ratified RISC-V Vector Extension, several architectural terms are used throughout. VLEN refers to the vector register length in bits, while SEW is the Selected element width. LMUL describes vector register grouping, allowing a logical vector register to span multiple physical registers when wider or longer vectors are needed. Chaining refers to the ability for dependent vector operations to overlap in time, so a consuming instruction can begin once producing lanes become available rather than waiting for full completion.
-
-Memory behavior is described in terms of unit-stride and strided accesses. Unit-stride load and store operations access contiguous elements, which typically makes the best use of caches and memory bandwidth. Strided operations access elements separated by a fixed distance, which can be necessary for certain layouts but often increases cache line traffic. When data arrives in a layout that is not immediately computation-ready, gather, slide, and permutation instructions can rearrange elements into the desired register format.
-
-Strided loads access elements separated by a fixed offset, which can increase cache line traffic and reduce effective bandwidth. Although both modes are supported by the RISC-V Vector Extension, performance is often constrained by memory behavior rather than arithmetic throughput.
-
-![Unit-Strided vs. Strided Memory Access](fig5-1-unit-stride-vs-strided.png)
-
-**Figure 5-1.** Unit-stride versus strided vector memory access.
+前几章介绍了 RVV 的执行模型、寄存器组织和指令语义。本章转向实际计算：同样一项任务，数据怎样加载、如何分块、指令怎样衔接，都会影响最终性能。下面通过矩阵乘法和乘累加循环来分析这些问题。
 
 ---
 
-## 5.3 Example: Single-Precision Matrix Multiplication
+## 5.1 引言
 
-To make these ideas concrete, the following example walks through the inner kernel of a single-precision matrix multiplication written directly using the RISC-V Vector Extension. Rather than presenting a full blocked GEMM implementation, the focus is deliberately narrowed to the vectorized inner loop that performs the core multiply-accumulate operation. For a fixed output row *i* and a vector-width range of columns *j...j+VL−1*, the inner loop computes:
+本章以两类计算示例结束 RVV 部分，看看向量长度无关编程、寄存器分组、链式执行、数据置换和不同访存模式如何配合，在保持代码可移植的同时提高吞吐率。
 
-![Matrix Multiplication Formula](fig5-1a-matmul-formula.png)
+讨论集中于两类常见负载：
 
-This example computes a vector slice of one output row at a time. Vectorization is applied across the column dimension, while accumulation over the shared inner dimension is expressed explicitly in a loop. The code illustrates how matrix multiplication is naturally mapped onto vector load, fused multiply-accumulate, and store operations, and how scalar values are broadcast into vector arithmetic when appropriate.
-
-![GEMM Inner Loop Code](fig5-1b-gemm-code.png)
-
-This formulation expresses matrix multiplication entirely using vector operations along one dimension, but reuse across the second dimension must still be orchestrated explicitly in software, highlighting the structural gap between vector execution and matrix-dominated workloads.
-
-By examining this kernel in isolation, it becomes easier to contrast scalar and vector execution models and to see how RVV expresses data parallelism without hard-coding a fixed vector width.
-
-### 5.3.1 Problem Definition
-
-The first example evaluates floating-point matrix multiplication using 32-bit elements. The workload assumes multiple independent matrix multiplications, which allows the implementation to exploit data-level parallelism by operating on several matrices at once. When the combined register demand of the matrices and intermediate results fits within the available vector register file, multiple instances can be processed concurrently, reducing loop overhead and improving throughput.
-
-The second example, presented later in this chapter under "Example: Vector Multiply-Accumulate Pipeline," examines a low-precision multiply-accumulate kernel representative of signal processing and machine learning inference workloads. Input data is stored in compact integer formats and widened or converted prior to accumulation, emphasizing sustained throughput and pipeline utilization rather than arithmetic density.
-
-### 5.3.2 Strided Load Implementation
-
-In the strided-load approach, corresponding elements from successive matrices are separated in memory by a constant offset. To load these elements efficiently, the code uses strided vector loads to bring matching positions from many matrices into vector registers. Once loaded, the multiply-accumulate sequence computes partial products and accumulates them into result registers using fused multiply-add operations.
-
-This method can deliver strong performance because it keeps the arithmetic units busy while amortizing loop control across multiple matrices. However, strided loads often require more cache line activity than unit-stride access, and the memory subsystem can become the limiting factor if the stride pattern prevents efficient line reuse.
-
-### 5.3.3 Unit-Stride Load with Permutation
-
-A second implementation replaces strided loads with unit-stride loads, followed by vector permutation operations that reorganize elements into a computation-friendly layout. The key idea is to load data contiguously, minimizing cache line fetches and improving bandwidth efficiency, and then use gather and slide operations to assemble the registers needed for the multiply-accumulate schedule.
-
-This technique can reduce memory traffic significantly, at the cost of additional shuffle instructions. In many systems the tradeoff is favorable, because fewer non-contiguous memory operations often outweigh the overhead of rearrangement, particularly when memory bandwidth or cache behavior constrains performance.
-
-Rather than using strided memory accesses, data can be loaded contiguously using unit-stride loads and then rearranged in registers using gather, slide, or permutation operations. This approach reduces memory traffic while preserving the data layout required for efficient vectorized computation.
-
-![Unit-stride load followed by vector permutation](fig5-2-unit-stride-permutation.png)
-
-**Figure 5-2.** Unit-stride load followed by vector permutation to form computation-ready registers.
-
-### 5.3.4 Performance Implications
-
-For small matrices that fit within the vector register file, both approaches can achieve comparable cycles per matrix when carefully scheduled. The unit-stride method typically reduces cache line accesses and can improve overall efficiency, while the strided method can be simpler when the data layout naturally matches the strided access pattern. Across both cases, the dominant lesson is that memory access patterns frequently determine the ceiling on performance, and vector software benefits when it can favor contiguous transfers and minimize scattered access.
-
-### 5.3.5 Scaling Behavior for Larger Matrices
-
-As matrix dimensions grow, the register footprint of inputs, temporaries, and outputs can exceed the available vector registers. When that happens, the computation must be decomposed into blocks, such as processing a subset of rows or columns at a time, accumulating partial results across multiple iterations. This introduces additional loads, stores, and loop structure, which increases the cycle count per matrix multiplication even though the arithmetic units remain efficient.
-
-Both strided and unit-stride strategies remain applicable, but efficiency now depends heavily on tiling choices and how well the tile dimensions align with VLEN and LMUL. When the tile shape maps cleanly to vector lanes, utilization remains high; when it does not, some lanes carry no useful work and throughput falls. This sensitivity is not unique to RISC-V Vector but is a general property of vector architectures, reinforcing the importance of tiling and layout-aware kernels.
-
-![Matrix size vs vector register capacity](fig5-3-matrix-size-capacity.png)
-
-**Figure 5-3.** Relationship between matrix size and vector register capacity.
-
-When matrices and intermediate results fit entirely within the vector register file, multiple instances can be processed concurrently with high efficiency. As matrix dimensions grow beyond available register capacity, tiling and partial accumulation become necessary, increasing memory traffic and reducing utilization.
-
-Beyond raw throughput, predictability has emerged as a critical requirement for modern AI and data-parallel workloads. The author has previously explored these ideas in a series of essays on deterministic execution and AI-oriented processor design. In "Beyond Von Neumann: Toward a Unified Deterministic Architecture" (VentureBeat), the author argues that as machine learning inference, real-time analytics, and safety-critical systems become more prevalent, worst-case execution behavior matters as much as peak performance. Systems that exhibit wide performance variance due to speculation, cache effects, or control hazards complicate scheduling, capacity planning, and power management.
-
-Vector execution mitigates many of these concerns by emphasizing regular computation, explicit data movement, and deterministic scheduling. When combined with scalable vector length and well-chosen tiling strategies, vectorized kernels can deliver both high throughput and predictable performance envelopes. This predictability reinforces the value of vector architectures not only as performance engines but as reliable computational substrates for AI workloads that must meet latency and consistency constraints.
+- 单精度浮点矩阵乘法，同时考验算术强度与内存布局；
+- 低精度乘累加循环，常见于信号处理和机器学习推理，其中加载、加宽、类型转换和融合算术构成紧密衔接的流水线。
 
 ---
 
-## 5.4 Example: Vector Multiply-Accumulate Pipeline
+## 5.2 术语与架构背景
 
-### 5.4.1 Workload Description
+本章沿用前文的术语，并区分体系结构参数与微架构机制：
 
-This workload loads low-precision integer data, widens or converts it, and then performs repeated multiply-accumulate operations. Such patterns appear frequently in signal processing and machine learning inference, where input data is compact but computation is performed at higher precision. The loop structure emphasizes sustained throughput, with the objective of approaching one effective vector operation per cycle through careful overlap of load, conversion, and arithmetic.
+- VLEN 表示单个向量寄存器的位数，是每个硬件线程（hart）的实现参数；
+- SEW 表示选定元素位宽；
+- LMUL 控制体系结构寄存器分组，整数 LMUL 可以让一个逻辑操作数跨越多个寄存器；
+- 链式执行是实现层面的机制：上游指令生成首批元素或元素组后，下游便可开始处理，无须等整个向量完成。它不是 RVV 1.0 的必选要求。
 
-### 5.4.2 Chaining and Pipeline Utilization
+本章重点比较单位步长和固定步长访存。单位步长访问连续元素，通常更容易用满缓存行和内存带宽；固定步长访问的相邻元素相隔固定字节数，适合某些数据布局，却可能触及更多缓存行。数据加载后若还不便直接计算，可以使用 `vrgather`、slide 等指令在寄存器内重排。
 
-A key performance feature in this workload is chaining, which allows the pipeline stages of load, integer operations, conversion, and fused multiply-add to overlap. When the fused multiply-add units are fully pipelined, they can sustain a steady issue rate, and the loop can achieve a high fraction of peak arithmetic throughput. As vector length scales upward, the number of elements processed per instruction increases, allowing the same control structure to deliver proportionally higher throughput.
+RVV 同时支持这两类访存，但在实际系统中，性能上限往往先由内存行为决定，而不是由算术单元的峰值吞吐率决定。
 
-Vector instruction chaining allows dependent operations such as loads, conversions, and fused multiply-accumulate instructions to overlap in time. Partial results flow directly between pipeline stages, enabling sustained throughput without speculative execution.
+![单位步长与固定步长访存](images/fig5-1-unit-stride-vs-strided.png)
 
-![Vector pipeline execution with instruction chaining](fig5-4-pipeline-chaining.png)
-
-**Figure 5-4.** Vector pipeline execution with instruction chaining.
-
-Vector chaining concept is derived from the "load/store multiple" instruction. Instead of loading/storing a single register, the load/store multiple instruction moves a block of memory data into multiple registers. The "multiple" concept is extended to the arithmetic instructions where arithmetic operations are performed on multiple registers. The multiple operations (LMUL > 1), allow the vector processor to chain the operations in consecutive cycle. The chaining concept works better with vector rather than scalar codes where the vector code is expected to operate on large number of elements.
-
-### 5.4.3 Effect of ISA Evolution
-
-Earlier draft versions of the vector specification included combined operations that loaded and extended elements in a single instruction. Later revisions separated these into distinct load and extension instructions. The separation increases instruction count modestly and can introduce a small performance penalty, but it also clarifies the RISC concept of the ISA and improves extensibility. Software can accommodate the change with minor kernel adjustments while retaining most of the benefits of vector execution. The advantage of RISC-V is the custom extension where the vector load with extended elements can be defined as custom instruction to boost the performance. In similar token, as mentioned earlier, the index vector load/store could be broken into 2 instructions: unit vector load and vector vrgather.
+**图 5-1　单位步长与固定步长向量访存**
 
 ---
 
-## 5.5 Design and Implementation Considerations
+## 5.3 示例：单精度矩阵乘法
 
-Vector processor implementations typically balance configurability, simplicity, and performance. Configurability can include vector length options, memory bus width, and cache sizing, allowing systems to target different power and area envelopes. Simplicity can be a first-order requirement because it reduces verification complexity and can shorten development cycles. Performance comes from parallel, pipelined functional units, efficient memory access, and a tight coupling between register operations and data movement.
+下面以直接使用 RVV 编写的单精度矩阵乘法内核为例。本节不展开完整的分块 GEMM，而只考察承担核心乘累加工作的向量化内层循环。固定输出行 `i`，并取从 `j` 开始、长度为 VL 的一段输出列，内层循环计算：
 
-Many implementations also provide mechanisms for streaming data between the vector unit and memory regions that behave like local vector memory. Such streaming paths can reduce overhead for pre-processing and post-processing and can complement cache-based access when data is large or when software wants predictable transfer behavior.
+![矩阵乘法公式](images/fig5-1a-matmul-formula.png)
+
+该实现每次计算输出矩阵某一行中的一个向量片段。列维度使用向量并行，共享的内积维度仍由显式循环完成累加。代码由此展示了矩阵乘法如何映射为向量加载、融合乘累加和存储，以及何时需要把标量广播到向量运算中。
+
+![GEMM 内层循环代码](images/fig5-1b-gemm-code.png)
+
+> **译注：**图中使用简化的 intrinsic 名称和 `/*max*/` 占位符，用于说明数据流，不是可直接编译的完整程序。实际代码应按目标工具链的 RVV intrinsic API 编写，并用剩余列数限制 VL，避免最后一个片段越界。
+
+这种写法沿列方向并行计算，沿 K 维循环累加。一个输出向量可以在整个 K 循环中留在寄存器里；若想进一步在多行之间复用 B 的数据，则还需要软件安排分块和寄存器分配。这正是向量指令如何组织矩阵计算的一个具体例子。
+
+把内层内核单独拿出来分析，既便于比较标量与向量执行模型，也能看清 RVV 如何在不写死向量宽度的前提下表达数据并行性。
+
+### 5.3.1 问题定义
+
+接下来考虑多组互不依赖的 32 位浮点矩阵乘法。与上面沿一个矩阵的列方向向量化不同，这里可以把不同矩阵中相同位置的元素放到一个向量里，并行推进多个实例。只要工作集能放入可用的向量寄存器，就有机会把循环控制开销分摊到多组矩阵上。
+
+本章后面的“向量乘累加流水线”示例则考察低精度 MAC 内核。输入采用紧凑整数格式存储，参与累加前先进行加宽或类型转换；这里关注的是持续吞吐率和流水线利用率，而不只是单次运算的计算密度。
+
+### 5.3.2 固定步长加载方案
+
+在固定步长方案中，不同矩阵同一位置的元素在内存中相隔固定距离。代码使用固定步长向量加载，把多组矩阵的对应元素装入向量寄存器，再通过融合乘加计算部分乘积，并累加到结果寄存器。
+
+这种方法可以让算术单元持续工作，并把循环控制开销分摊到多组矩阵上。不过，固定步长加载通常会触及更多缓存行；如果访问间距又不利于缓存行复用，内存子系统很快就会成为瓶颈。
+
+### 5.3.3 单位步长加载加寄存器置换
+
+第二种方案改用单位步长加载，再通过向量置换把元素整理成适合计算的布局。核心思路是：
+
+1. 连续加载数据，减少需要读取的缓存行，提高有效带宽；
+2. 使用 `vrgather`、slide 等操作，在寄存器内形成 MAC 调度所需的数据布局。
+
+这种方法增加了置换指令，却减少了离散访存。在瓶颈主要位于内存系统时，这笔交换通常值得；若置换单元或跨通道网络已经繁忙，则还需重新评估。
+
+> **译注：**“连续加载后重排”并不总能替代索引或固定步长加载。需要确认连续区域可以安全读取、数据能装入寄存器，并且额外访存不会改变程序语义。
+
+![单位步长加载后执行向量置换](images/fig5-2-unit-stride-permutation.png)
+
+**图 5-2　单位步长加载后，通过向量置换形成可直接计算的寄存器布局**
+
+### 5.3.4 性能影响
+
+对于能够完全放入 VRF 的小矩阵，只要调度得当，两种方案处理每个矩阵所需的周期数可能相近。单位步长方案通常能减少缓存行访问、提高整体效率；如果原始数据布局本来就适合固定步长访问，后者的实现则更直接。
+
+两种方案说明了同一件事：实际性能往往由访存模式决定。编写向量内核时，应尽量采用连续传输，减少离散访问。
+
+### 5.3.5 大矩阵的伸缩行为
+
+矩阵规模增大后，输入、临时值和输出可能无法同时放入 VRF。此时需要分块：每次处理一部分行或列，跨多轮计算累加结果。分块引入更多调度和数据搬运，也提供了在缓存和寄存器中复用数据的机会；关键是让当前工作集适合可用的存储容量。
+
+固定步长与单位步长策略仍然适用，但效率会更加依赖矩阵块（tile）的形状，以及它与 VLEN、LMUL 的匹配程度。矩阵块若能较好地映射到向量执行资源，硬件利用率就较高；映射不整齐时，最后一段可能出现较多非活动元素，吞吐率随之下降。这是向量架构的普遍问题，并非 RVV 独有，因此分块策略和对数据布局的理解十分重要。
+
+![矩阵规模与向量寄存器容量](images/fig5-3-matrix-size-capacity.png)
+
+**图 5-3　矩阵规模与向量寄存器容量的关系**
+
+矩阵和中间结果能够全部放入 VRF 时，可以高效地并行处理多个实例。超过寄存器容量后，就需要分块并多次累加部分结果，内存流量随之增加，执行资源的利用率也可能下降。
+
+除了峰值吞吐率，性能的可预测性也日益受到现代 AI 和数据并行系统的重视。作者在 VentureBeat 文章 “Beyond Von Neumann: Toward a Unified Deterministic Architecture” 中提出，随着机器学习推理、实时分析和安全关键系统的发展，最坏情况下的执行行为可能与峰值性能同样重要。推测执行、缓存未命中和控制冒险带来的性能波动，会增加任务调度、容量规划和功耗管理的难度。
+
+规则计算、显式数据搬运和预先安排的调度，有助于减少执行时间的不确定性。配合合理分块和可控的存储层次，向量计算内核有机会同时获得较高吞吐率和较稳定的延迟。这对需要满足实时要求的 AI 系统尤为重要。
+
+> **译注：**可预测性并不是 RVV 指令集自动提供的属性。缓存层次、共享内存争用、中断、标量前端以及具体调度策略仍会影响执行时间。这里表达的是原作者的体系结构主张：规则的向量数据流比高度依赖控制推测的执行方式更容易分析。
 
 ---
 
-## 5.6 Comparison with Fixed-Width SIMD Approaches
+## 5.4 示例：向量乘累加流水线
 
-Compared with fixed-width SIMD architectures, the RISC-V Vector Extension emphasizes scalability and portability. Vector-length agnostic programming allows the same binary to adapt to different hardware widths, while LMUL provides flexibility in how data is packed and operated upon. Chaining further increases the potential for sustained throughput by enabling deeper overlap among dependent vector operations. Taken together, these characteristics allow performance to scale with implementation width without requiring software to be rewritten for each target.
+### 5.4.1 工作负载
 
----
+该负载先读取低精度整数，完成加宽或格式转换，再反复执行乘累加。这类模式常见于信号处理和机器学习推理：输入用较少位数存储，计算与累加采用更高精度。优化目标是重叠加载、转换和算术阶段，让流水线在稳态下持续处理新数据。
 
-## 5.7 Tooling and Performance Analysis
+### 5.4.2 链式执行与流水线利用率
 
-High-performance vector software benefits from tooling that makes execution behavior visible. Cycle-accurate simulation, instruction-level profiling, and pipeline visualization help developers identify stalls, bubbles, and memory bottlenecks. With that feedback, kernels can be tuned by adjusting data layout, reducing scattered accesses, rebalancing unrolling, and improving overlap between memory operations and arithmetic.
+链式执行让加载、整数运算、格式转换和融合乘加相互重叠。如果 FMA 单元能持续接收新数据，供数带宽充足，依赖关系也允许及时发射，循环便有机会接近峰值吞吐率。更大的 VLEN 让同一条指令覆盖更多元素，有助于摊薄前端开销；向量长度无关的循环结构不必因此改写。
 
----
+> **译注：**VLEN 增大不等于每周期吞吐率按比例增加。若 DLEN 和功能单元数量不变，一条指令只是执行更多拍。实际吞吐率还受寄存器端口、访存带宽及累加依赖限制。
 
-## 5.8 Summary
+部分结果可以从生产者流水线直接送往消费者，使相关的加载、转换和 FMA 无须等到前一条指令完整结束后再串行启动。链式执行本身依赖的是已知的数据相关和资源调度，并不要求 VPU 对控制流进行推测；但它也不排斥系统中的标量前端采用推测执行。
 
-This chapter used concrete computation kernels to show how the RISC-V Vector Extension enables high throughput through scalable vector length, flexible register grouping, efficient memory access modes, and chaining. Across both matrix multiplication and multiply-accumulate loops, performance is shaped as much by data layout and memory behavior as by peak arithmetic capability. When kernels are structured to favor contiguous access, align tiles to vector lanes, and exploit overlap among pipeline stages, vector execution can deliver dramatic speedups while preserving portability across implementations.
+![利用指令链式执行的向量流水线](images/fig5-4-pipeline-chaining.png)
 
-To place these examples in proper historical context, it is useful to understand how vector processing evolved from earlier fixed-width SIMD architectures. Early SIMD designs such as SSE and AVX tied software directly to a fixed hardware width, requiring recompilation or rewriting to take advantage of wider datapaths. The RISC-V Vector Extension departs from this model by defining vector semantics independently of physical register width. Software specifies the active vector length dynamically at runtime, allowing the same binary to scale transparently across implementations with different vector widths. This architectural choice underpins the portability and longevity of vectorized code demonstrated throughout this chapter.
+**图 5-4　利用链式执行重叠向量流水线**
 
-At the microarchitectural level, vector performance derives not only from parallel datapaths but from deep pipelining and instruction chaining. Vector pipelines are designed so that different stages of successive vector instructions overlap in time, allowing dependent operations such as loads, conversions, and arithmetic to execute concurrently without full serialization. Chaining enables partial results to flow directly from one functional unit to the next, which explains the high sustained throughput observed in multiply-accumulate workloads. Rather than relying on speculative execution, vector processors achieve performance through deterministic overlap of long-running operations.
+可以借“多寄存器加载/存储”来理解这种方式：LMUL>1 时，一条指令覆盖多个体系结构寄存器，数据可分批送入功能单元，已完成的部分再交给后续指令。一次处理的元素较多时，相关指令更容易形成持续的稳态流水。
 
-This deterministic overlap stands in contrast to the speculative execution techniques that have dominated general-purpose CPU design for decades. As discussed by the author in "Moving Past Speculation: How Deterministic CPUs Deliver Predictable AI Performance" (VentureBeat), speculative architectures attempt to maximize average performance by predicting future control flow or data dependencies, executing work that may later be discarded. While effective for irregular scalar workloads, speculation introduces variable latency, wasted energy from mispredictions, and increasing architectural complexity.
+> **译注：**原文将 chaining 的概念来源归于“多寄存器加载/存储”，这里仅保留为帮助理解的类比。向量 chaining 早在经典向量机（如 Cray-1）中就已出现，并不以 RVV 的 LMUL 为前提。
 
-Deterministic execution models take a different approach. Instructions are scheduled based on known dependencies and resource availability rather than prediction, allowing pipelines to remain busy without guesswork. For data-parallel workloads, especially those dominated by regular loops and predictable memory access, deterministic execution can achieve high utilization with bounded latency. Vector architectures naturally align with this model because long-running vector instructions expose ample instruction-level parallelism without relying on speculative control flow. In this sense, instruction chaining and pipeline overlap in vector execution represent a form of structured, deterministic concurrency rather than speculative acceleration.
+### 5.4.3 ISA 演进的影响
 
-Large data sets are processed in chunks whose size is determined at runtime using vector-length configuration instructions. Masking ensures correctness for the final partial iteration. This technique allows vectorized code to scale naturally to problem sizes larger than the maximum supported vector length.
+早期 RVV 草案包含把“加载”和“扩展”合在一起的指令；后续版本将两项操作拆成独立指令。拆分后指令数略有增加，在某些内核中可能带来少量开销，但语义更符合 RISC 的加载-存储式设计，也便于独立组合不同的扩展操作。
 
-![Strip-mining using dynamic vector length and masking](fig5-5-strip-mining.png)
-
-**Figure 5-5.** Strip-mining using dynamic vector length and masking.
-
-When data sets exceed the maximum vector length supported by a given implementation, vectorized code relies on a technique known as strip-mining. In this approach, loops iterate over the input data in chunks whose size is determined dynamically using vector-length configuration instructions. Masking ensures correctness for the final partial iteration. Strip-mining allows algorithms such as matrix multiplication to scale naturally to arbitrarily large problem sizes while preserving the same vectorized structure used for smaller workloads.
-
-From a hardware perspective, implementing a scalable vector architecture introduces nontrivial trade-offs. Wider vector registers increase register file bandwidth requirements and complicate precise exception handling, while aggressive memory access patterns place additional demands on cache and load-store units. The examples in this chapter illustrate how careful use of unit-stride accesses, register grouping, and permutation operations can mitigate these challenges and deliver high performance without excessive hardware complexity.
-
-Although the case studies in this chapter focus on matrix multiplication and accumulation loops, the same architectural mechanisms apply across a wide range of workloads. Scientific computing, signal processing, multimedia, data compression, cryptography, and machine learning all benefit from vector execution models that emphasize regular data parallelism and predictable memory access. The RISC-V Vector Extension provides a general-purpose foundation for these domains, enabling high performance while maintaining architectural simplicity and software portability.
-
-Throughout this chapter, several architectural behaviors are best understood visually. Key diagrams include the vector register file organization defined in the RISC-V Vector specification, illustrations of unit-stride versus strided memory access patterns, examples of LMUL-based register grouping, and pipeline timelines demonstrating instruction chaining across vector functional units. These figures align directly with the official RISC-V Vector specification and are referenced conceptually here to maintain architectural accuracy without binding the discussion to a specific implementation.
-
-Terminology in this chapter is used consistently with earlier chapters. Vector length refers to the architectural VLEN parameter, register grouping corresponds to LMUL, and chaining denotes temporal overlap of dependent vector instructions within the execution pipeline. These terms are applied uniformly to ensure conceptual continuity across the book.
-
-A broader architectural implication, highlighted by the author in "Beyond Von Neumann," is the movement toward unifying scalar, vector, and matrix computation under a single deterministic execution framework. Rather than treating vector or matrix engines as peripheral accelerators with separate programming models and memory spaces, unified designs schedule all forms of computation along a shared timeline. In such systems, vector pipelines are first-class execution resources, enabling data-parallel and control-oriented code to coexist without excessive synchronization or data transfer overhead.
-
-From a broader perspective, the examples in this chapter highlight why vector architectures are again central to modern computing. As workloads shift toward data-parallel and AI-dominated execution, architectures that prioritize scalable throughput, deterministic performance, and software longevity become increasingly valuable. The RISC-V Vector Extension demonstrates that high performance need not come at the expense of architectural simplicity, positioning vector processing as a foundational capability for the next generation of computing systems.
+软件调整计算内核后，通常仍能保留主要的向量化收益。若产品特别依赖组合操作，可以通过自定义扩展提供专用指令，不过使用它的代码也会增加平台依赖。满足前述安全性和语义条件时，某些索引加载还可改写为“单位步长加载 + `vrgather`”，把数据选择工作从访存单元转移到寄存器置换阶段。
 
 ---
 
-## References
+## 5.5 设计与实现考虑
 
-Tran, Thang. "Moving Past Speculation: How Deterministic CPUs Deliver Predictable AI Performance." VentureBeat, 2024.
+向量处理器通常要在可配置性、简洁性和性能之间平衡。
+
+- 可配置项可以包括 VLEN、内存总线宽度和缓存容量，使系统覆盖不同的功耗、面积与性能目标；
+- 简洁性会直接降低验证复杂度、缩短开发周期；
+- 性能来自并行且流水化的功能单元、高效访存，以及寄存器操作与数据搬运之间的紧密配合。
+
+有些实现还会在向量单元与本地存储区之间提供流式数据通路。面对大规模数据，或软件希望更明确地控制传输行为时，这类通路可以降低预处理和后处理开销，作为传统缓存访问方式的补充。
+
+---
+
+## 5.6 与定宽 SIMD 的比较
+
+与定宽 SIMD 相比，RVV 的突出特点是向量长度无关编程：在支持所需扩展、满足程序运行条件的实现上，同一份二进制代码可以适配不同 VLEN；LMUL 进一步提供灵活的寄存器分组。支持链式执行的硬件则能让相关指令重叠，改善持续吞吐率。这三者分别涉及可移植性、寄存器组织和具体执行机制，不宜混为一谈。
+
+这些特征减少了软件对具体硬件宽度的依赖。不过，要达到每一种实现的最佳性能，内核仍可能需要针对功能单元数量、存储系统和流水线组织进行调优。
+
+---
+
+## 5.7 工具与性能分析
+
+高性能向量软件离不开能够呈现执行行为的分析工具。周期精确仿真、指令级性能剖析和流水线可视化，有助于定位停顿、空泡与内存瓶颈。开发者可以据此调整数据布局、减少离散访问、重新选择循环展开程度，并加强访存与算术之间的重叠。
+
+---
+
+## 5.8 小结
+
+本章通过具体计算内核说明，RVV 如何依靠向量长度无关编程、灵活的寄存器分组、高效访存和链式执行获得较高吞吐率。无论是矩阵乘法还是 MAC 循环，数据布局和内存行为对性能的影响都不亚于算术峰值。优先采用连续访问、选择适合向量执行资源的分块形状，并充分重叠各流水阶段，通常能在保持跨实现可移植性的同时取得明显加速。
+
+SSE、AVX 等定宽 SIMD 指令把操作宽度写进 ISA。要利用新一代的更宽指令，通常需要重新生成代码，或在程序中准备多个版本。RVV 则让循环通过 `vsetvl*` 获取当前 VL，按实际返回值推进，同一份向量长度无关代码就能适配不同 VLEN。这是本章示例保持可移植性的基础。
+
+在微架构层面，并行数据通路提供算力，流水线和链式执行则帮助持续使用这些算力。加载、转换和算术不必整条指令串行执行，部分结果就绪后便可供下游使用。对规则的数据并行循环，这种重叠已经能提供大量并行机会，不必完全依靠控制流推测。
+
+作者在 “Moving Past Speculation: How Deterministic CPUs Deliver Predictable AI Performance” 中将其与推测执行作了比较。推测执行通过预测控制流或依赖关系提高平均性能，但预测失败会浪费已做的工作，也可能增加延迟波动。作者主张按已明确的依赖和资源可用性调度，以取得更稳定的流水线利用率。这是一种设计取舍，尤其适合规则循环和访存较可预测的负载，并非对所有向量处理器的统一描述。
+
+当数据规模超过一次向量操作能够处理的范围时，软件采用分段处理。循环每轮通过 `vsetvl*` 根据剩余元素数和当前 `vtype` 确定 VL，再按 VL 向前推进。最后一轮即使不足 VLMAX，也可由较小的 VL 以及必要的掩码或尾部策略保证正确性。
+
+![使用动态向量长度与掩码进行分段处理](images/fig5-5-strip-mining.png)
+
+**图 5-5　使用动态向量长度与掩码进行分段处理**
+
+因此，矩阵乘法等算法可以处理任意规模的问题，而核心向量化循环不必为某个固定 VLEN 重写。
+
+从硬件角度看，可伸缩向量架构也有不容忽视的代价：更宽的数据通路会提高 VRF 带宽需求，长向量指令也会使精确异常处理更加复杂；固定步长和索引等访存模式则会给缓存及向量加载/存储单元带来额外压力。本章示例说明，优先使用单位步长访问、合理安排寄存器分组并在寄存器内完成必要的置换，可以缓解其中一部分问题。
+
+本章虽以矩阵乘法和累加循环为例，同样的机制也适用于科学计算、信号处理、多媒体、数据压缩、密码学和机器学习。这些领域都受益于规则数据并行与可预测访存。RVV 为它们提供了一套通用基础，在高性能、架构简洁性和软件可移植性之间保持平衡。
+
+作者在 “Beyond Von Neumann” 中进一步主张统一调度标量、向量和矩阵计算，让数据并行代码与控制代码更紧密地协作，减少彼此独立的加速器接口可能带来的同步和数据搬运开销。
+
+随着数据并行和 AI 负载不断增加，处理器既需要更高吞吐率，也需要更可预测的性能和更长的软件使用寿命。RVV 提供了一条兼顾这些目标的路径：保留开放、相对简洁的 ISA，同时为不同规模的实现提供统一的向量编程模型。
+
+---
+
+## 参考资料
+
+以下两项书目信息按英文原作保留。2026-09-05 复核时，链接均返回 HTTP 429 访问验证，未能独立核实正文、标题和年份；不能将访问失败视为文献不存在。
+
+Tran, Thang. “Moving Past Speculation: How Deterministic CPUs Deliver Predictable AI Performance.” *VentureBeat*, 2024.  
 https://venturebeat.com/ai/moving-past-speculation-how-deterministic-cpus-deliver-predictable-ai
 
-Tran, Thang. "Beyond Von Neumann: Toward a Unified Deterministic Architecture." VentureBeat, 2024.
+Tran, Thang. “Beyond Von Neumann: Toward a Unified Deterministic Architecture.” *VentureBeat*, 2024.  
 https://venturebeat.com/ai/beyond-von-neumann-toward-a-unified-deterministic-architecture
+
+
+---
+
+## 支持原作与反馈
+
+*译者附记*
+
+**如果这篇内容对你有帮助，欢迎访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并向原作者分享你的阅读反馈。** 这是作者在授权交流中特别提出的期待，也是支持这份教程继续完善的一种方式。
+
+反馈不必很长：哪一章最有帮助、哪个概念仍不清楚、希望增加哪些算例，都值得告诉作者。作者不阅读中文，建议使用简短英文，并注明来自 *RISC-V Vector Primer* 中文译本。
+
+中文翻译的用词、错漏或排版问题，请在译文评论区或中文译稿仓库反馈，由译者跟进；不要将译文中的问题视为原作者已经审定的内容。

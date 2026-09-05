@@ -1,331 +1,340 @@
-# Chapter 1 — RISC-V Vector Extension Demystified
+# 第 1 章：揭开 RISC-V 向量扩展的面纱
 
-If you are reading this, there's a good chance you've already tried to understand the official RISC-V Vector Extension (RVV) specification and bounced off it at least once. You're not alone.
+> 本文是 *RISC-V Vector Primer* 的非官方中文译文，经原作者邮件许可，用于非商业技术教育。
+>
+> 原作者：Thang Minh Tran、Paul Miller；编辑：Jonah McLeod；出版方：Simplex Micro。中文翻译：Ch'in。
+>
+> [英文原作](https://github.com/simplex-micro/riscv-vector-primer) · 依据版本：`fc66957a6458842beeabe9d85065ff334ccbd333`（2026-07-25）。授权摘要及译注原则见[翻译说明](TRANSLATION-NOTICE.md)。原作者未审校中文译文。
+>
+> **支持原作：**作者特别欢迎中文读者访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并分享阅读反馈与改进建议。文末附有反馈说明。
 
-When we first presented this material as a three-hour live tutorial, the most common reaction was some variation of:
+读到这里，你或许已经翻过 RISC-V 向量扩展（RISC-V Vector Extension，RVV）的官方规范，却仍有不少概念没弄明白。这种经历并不少见。
 
-> "This is the first time the RISC-V Vector Extension has actually felt *digestible*."
+我们最初以一场三小时的现场教程讲授这些内容时，最常听到的反馈大意是：
 
-Engineers who had been through the spec multiple times suddenly found that, with the right mental model and some worked examples, the ideas were not only understandable—they were elegant.
+> “这是我第一次觉得 RISC-V 向量扩展真正变得容易理解了。”
 
-This book is the written, expanded version of that tutorial: a guided tour intended to turn the RISC-V Vector Extension from a forbidding PDF into a practical tool you can reason about, implement, and program with confidence.
+不少工程师此前已经反复读过多遍规范。建立起合适的思维模型，再看几个完整算例后，他们才发现：这些概念不但可以理解，而且相当优雅。
 
-In this first chapter, we'll set the stage:
+本书由那场教程扩充而来。我们会循序渐进地讲解 RVV，帮助你读懂规范，理解如何用它编程，以及如何把它实现为硬件。
 
-- What a vector processor is and how it differs from classic SIMD and graphics engines
-- Why RVV was designed the way it is
-- The core terminology: vector register length, element width, grouping, masks, vector length (VL), strip mining, and chaining
-- The architectural challenges that make vector design very different from simply "widening" a scalar core
+本章先建立整体背景：
 
-Later chapters will go deeper into the ISA details, memory operations, compute instructions, and real code. But first we need a solid conceptual foundation.
+- 什么是向量处理器，它与经典 SIMD 和图形处理引擎有什么区别；
+- RVV 为什么采用现在的设计；
+- 核心术语：向量寄存器长度、元素位宽、寄存器分组、掩码、向量长度（VL）、分段处理（strip mining）和链式执行（chaining）；
+- 为什么向量架构的设计挑战与简单地“加宽”标量处理器截然不同。
 
-## 1.1 The Voice Behind the Vectors
+后续章节会深入介绍 ISA 细节、访存操作、计算指令和实际代码。在此之前，我们需要先打牢概念基础。
 
-The ideas in this chapter come from more than three decades of my microprocessor design experience.
+## 1.1 从设计者的经历谈起
 
-I am your guide for the technical parts, a hardware architect who has spent over 40 years building microprocessors: x86, Arm, PowerPC, ARC and now RISC-V. That perspective matters. When I praise the simplicity of RISC-V, it's not because I've read a white paper; it's because I've spent real silicon budget implementing other ISAs and know what hurts.
+本章的内容凝结了我三十多年的微处理器设计经验。
 
-## 1.2 What This Chapter Is (and Isn't)
+接下来的技术内容由我来讲解。我是一名硬件架构师，在四十多年的职业生涯中先后参与过 x86、Arm、PowerPC、ARC 和 RISC-V 微处理器的设计。这些经历影响了我看待 ISA 的方式：我对 RISC-V 简洁性的认同，来自亲手实现其他 ISA 时的体会，也来自为复杂功能付出的面积和工程成本。
 
-This chapter is not a line-by-line commentary on the RVV specification. Instead, it's a practical introduction that gives you:
+## 1.2 本章讲什么，又不讲什么
 
-- The *mental models* you need to understand later details
-- The *terminology* that appears throughout the spec and implementation documents
-- A clear distinction between vector processors, SIMD, and GPUs
-- The why behind RVV: why it's scalable, why it's register-based, why concepts like VL, SEW, and LMUL exist
+本章不是对 RVV 规范逐行逐句的注释，而是一份面向实践的导论，旨在帮助你获得：
 
-Later chapters will drill into:
+- 理解后续细节所需的*思维模型*；
+- 规范和实现文档中反复出现的*术语体系*；
+- 向量处理器、SIMD 与 GPU 之间的清晰区别；
+- RVV 各项设计背后的原因：为什么它具有可伸缩性，为什么以寄存器为中心，以及为什么需要 VL、SEW 和 LMUL 等概念。
 
-- Control and status registers (CSRs) like vtype, vl, sew, and vstart
-- Memory operations (unit-stride, stride, index, segment)
-- Arithmetic and logical operations
-- Practical examples: loops, dot products, matrix multiplies, FFTs, and AI/ML kernels
+后续章节将进一步讨论：
 
-Think of this chapter as learning the grammar and vocabulary before you start reading poetry.
+- `vtype`、`vl` 和 `vstart` 等控制与状态寄存器（CSR），以及 SEW 等配置字段；
+- 单位步长、固定步长、索引和分段等访存操作；
+- 算术与逻辑运算；
+- 循环、点积、矩阵乘法、FFT 和 AI/ML 内核等实际示例。
 
-## 1.3 Why Vector Processors Matter Now
+可以把本章看作语法和词汇课：先打好基础，再去读后面那首“诗”。
 
-Vector processors are not new. Machines like Cray's vector supercomputers and Fujitsu's vector systems were doing vector math decades ago. What's changed is the context:
+## 1.3 为什么现在仍然需要向量处理器
 
-The Cray-1 separates scalar and vector execution using dedicated register files and deeply pipelined functional units. Vector registers feed multiple arithmetic pipelines, enabling chaining and sustained throughput. This diagram is a conceptual illustration intended to highlight execution structure rather than a literal hardware block diagram.
+向量处理器并不是新概念。早在几十年前，Cray 向量超级计算机和 Fujitsu 向量系统就已经进行向量计算。真正发生变化的是应用背景。
 
-![Cray-1 Architecture](fig1-1.png)
+Cray-1 使用专用寄存器文件和深流水功能单元，将标量执行与向量执行分离。向量寄存器向多条算术流水线供数，从而支持链式执行并维持持续吞吐率。下图是突出执行结构的概念示意，而不是严格对应实际硬件的模块框图。
 
-**Figure 1-1.** Cray-1 Architecture (Simplified Conceptual View)
+![Cray-1 架构](images/fig1-1.png)
 
-- AI and machine learning workloads are inherently data-parallel.
-- Signal processing, cryptography, graphics, and scientific computing still demand high throughput over arrays of numbers.
-- In many systems there's a need for something more flexible and programmer-friendly than "just write a GPU kernel," and more efficient than pounding everything through scalar cores.
+**图 1-1　Cray-1 架构（简化概念图）**
 
-This is where the RISC-V Vector Extension comes in:
+- AI 和机器学习工作负载天然具有数据并行性；
+- 信号处理、密码学、图形和科学计算仍需要对数值数组提供高吞吐处理；
+- 许多系统需要一种比“直接写 GPU 内核”更灵活、更易编程，同时又比把所有工作压到标量核上更高效的方案。
 
-- It defines a scalable vector ISA that can work for small embedded cores or wide data center engines.
-- It keeps the RISC philosophy: load/store design, simple fixed-field encoding, and clear separation between scalar and vector state.
-- It is designed so that one binary can run on different implementations with different vector register widths, without recompilation.
+这正是 RISC-V 向量扩展发挥作用的地方：
 
-To understand why that last point is so important, we need to contrast vector processors with the more familiar world of SIMD.
+- 它定义了一套可伸缩的向量 ISA，既能用于小型嵌入式处理器核，也能用于数据中心的宽执行引擎；
+- 它延续了 RISC 的基本理念：采用加载/存储架构，保持规整、位置固定的指令字段，并清晰分离标量状态与向量状态；
+- 它使同一个二进制程序能够在向量寄存器宽度不同的实现上运行，而无需重新编译。
 
-## 1.4 Flynn's Taxonomy: Where Vectors Fit
+要理解最后一点为何如此重要，需要先把向量处理器与更熟悉的 SIMD 进行比较。
 
-In the 1970s, Michael Flynn proposed a classification of computer architectures based on instruction and data streams:
+## 1.4 Flynn 分类法：向量处理器属于哪一类
 
-- **SISD** – Single Instruction, Single Data
-  - Classic scalar processors: one instruction operates on one data element at a time.
-- **SIMD** – Single Instruction, Multiple Data
-  - One instruction applies to multiple data elements in parallel. This covers vector processors, classic SIMD units, and fixed-width vector instructions in CPUs.
-- **MISD** – Multiple Instruction, Single Data
-  - Rare in practice.
-- **MIMD** – Multiple Instruction, Multiple Data
-  - Multiprocessor and multicore systems, including most modern servers.
+20 世纪 70 年代，Michael Flynn 按照指令流和数据流对计算机架构进行了分类：
 
-![SIMD vs. Vector Execution Models](fig1-2.png)
+- **SISD（单指令流、单数据流）**
+  - 经典标量处理器：一条指令一次处理一个数据元素。
+- **SIMD（单指令流、多数据流）**
+  - 一条指令并行作用于多个数据元素。向量处理器、经典 SIMD 单元以及 CPU 中的定宽向量指令都属于这一类。
+- **MISD（多指令流、单数据流）**
+  - 实际系统中很少见。
+- **MIMD（多指令流、多数据流）**
+  - 多处理器和多核系统，包括大多数现代服务器。
 
-**Figure 1-2.** SIMD vs. Vector Execution Models
+![SIMD 与向量执行模型](images/fig1-2.png)
 
-SIMD architectures exploit parallelism by operating on a fixed number of elements per instruction, while vector processors treat a single instruction as a stream of operations over many elements. Vector execution overlaps computation across time using deep pipelines and chaining, enabling scalable performance without encoding vector width into the ISA.
+**图 1-2　SIMD 与向量执行模型**
 
-Both SIMD extensions (like SSE, AVX, NEON) and vector processors fall under SIMD in this taxonomy. The key difference isn't in Flynn's label; it's *how* they execute over datasets, and how they scale.
+图中的定宽 SIMD 用一条指令描述固定宽度的数据操作；经典向量处理器则可以把一条指令展开为随时间推进的元素流。借助流水线和链式执行，相关操作可以相互重叠。RVV 又通过向量长度无关的编程模型，使代码能够适配不同 VLEN 的实现。
 
-## 1.5 SIMD: Fixed-Width Parallelism
+SIMD 扩展（如 SSE、AVX、NEON）和向量处理器在 Flynn 分类中都属于 SIMD。关键差异不在分类标签，而在于它们*如何*处理数据集，以及如何随硬件规模伸缩。
 
-Consider a 32-bit scalar core.
+## 1.5 SIMD：定宽并行
 
-- In a classic scalar design, an ADD instruction processes one 32-bit value at a time.
-- If you add a 512-bit SIMD unit, that same instruction "style" (but with a different mnemonic) can process 16 parallel 32-bit elements (512 / 32 = 16).
+以一个 32 位标量处理器为例：
 
-At 1 GHz, if you could issue one such SIMD instruction every cycle, your peak throughput for 32-bit operations would be:
+- 在经典标量设计中，一条 `ADD` 指令一次处理一个 32 位数值；
+- 如果加入一个 512 位 SIMD 单元，相应的 SIMD 加法指令便能并行处理 16 个 32 位元素（512 / 32 = 16）。
 
-- 16 operations per cycle × 1 billion cycles per second = 16 Giga-ops/sec.
+假设频率为 1 GHz，并且每周期能够发射一条这样的 SIMD 指令，那么 32 位运算的理论峰值吞吐率为：
 
-For 8-bit elements in a 512-bit register, you'd operate on 64 elements per instruction, giving 64 Giga-ops/sec peak. Each time you widen the SIMD register, you scale throughput—*in theory*.
+- 每周期 16 次运算 × 每秒 10 亿周期 = 16 Giga-ops/s。
 
-In practice, several problems appear:
+对于 512 位寄存器中的 8 位元素，每条加法指令可以处理 64 个元素。在同样的频率和吞吐假设下，理论峰值可达 64 Giga-ops/s。只有执行通路和数据供给也相应加宽时，更宽的 SIMD 寄存器才会带来这种吞吐提升。
 
-1. **New width, new ISA baggage**
-   - Intel's MMX (64-bit), then SSE (128-bit), then AVX (256-bit), then AVX-512 all added new instruction sets or encodings for each width.
-   - Programmers and compilers must deal explicitly with which width is available and targeted.
+但实际中会出现几个问题：
 
-2. **Binary incompatibility**
-   - An executable written for one width doesn't automatically scale to another width.
-   - To fully exploit new hardware, you often need new binaries or dynamic code paths.
+1. **每增加一种宽度，就增加一套 ISA 负担**
+   - Intel 从 MMX（64 位）发展到 SSE（128 位）、AVX（256 位），再到 AVX-512，每一种宽度都引入了新的指令集或编码；
+   - 程序员和编译器必须明确处理目标平台支持哪种宽度。
 
-3. **Instruction explosion**
-   - Each new width tends to come with additional specialized operations, making the ISA huge and complex.
+2. **旧代码不能自动利用更宽的数据通路**
+   - 针对某一宽度生成的程序，即使能在兼容处理器上继续运行，也不会自动改用另一种指令宽度；
+   - 为充分利用新硬件，往往需要重新生成二进制文件，或者准备动态选择的多条代码路径。
 
-The result is a SIMD extension model where vector width is baked into the ISA and into your binaries.
+3. **指令数量膨胀**
+   - 每一种新宽度通常还会带来更多专用操作，使 ISA 变得庞大而复杂。
 
-RISC-V vectors take a different path.
+最终，在这种 SIMD 扩展模式中，向量宽度被固化进 ISA，也被固化进二进制程序。
 
-## 1.6 Vector Processors: Streams Over Time
+RISC-V 向量扩展选择了另一条路。
 
-A vector processor still executes single instructions over multiple elements, but the core idea is that a *single vector instruction* conceptually represents a loop over elements.
+## 1.6 向量处理器：沿时间展开的数据流
 
-Imagine a vector instruction like:
+向量处理器同样用一条指令处理多个元素，但其核心思想是：*一条向量指令*在概念上代表一个遍历元素的循环。
 
-> "Multiply vector X by constant A and accumulate into vector Y."
+假设有这样一条向量指令：
 
-Instead of writing a scalar loop with 64 iterations and all the loop control overhead, a vector processor lets you describe the operation once:
+> “向量 X 乘以常数 A，再把结果累加到向量 Y。”
 
-- Load 64 elements of X
-- Multiply them by A
-- Load 64 elements of Y
-- Add
-- Store back 64 elements
+如果使用标量代码，需要写一个迭代 64 次的循环，并承担循环控制开销。向量处理器则可以用一小段向量指令序列描述整批数据的操作：
 
-One vector instruction might internally break into multiple micro-operations that work on subsets of the elements (we'll call these "micro-ops" or "micro-ops in lanes"), but that's an implementation detail. From the ISA's point of view, you issued one instruction that operates on a vector length worth of data.
+- 加载 X 的 64 个元素；
+- 将这些元素乘以 A；
+- 加载 Y 的 64 个元素；
+- 执行加法；
+- 将 64 个结果写回。
 
-Two ideas are central here:
+一条向量指令在内部可能被拆成多个微操作（micro-op），每个微操作只处理一部分元素。不过，这只是实现细节；从 ISA 看，软件发出的仍是一条覆盖当前向量长度所指定元素数的指令。
 
-1. **VL (Vector Length)** – the number of active elements for a given operation.
-2. **Chaining** – the ability to start using results of part of a vector operation before the entire vector operation has completed.
+这里有两个核心概念：
 
-We'll come back to VL and chaining soon. First, let's look at another important mental model: time versus space.
+1. **VL（Vector Length，向量长度）**：本次操作处理的元素范围上界；正常从索引 0 开始且不使用掩码时，也就是参与运算的元素数；
+2. **链式执行（chaining）**：一个向量操作尚未全部完成时，后续操作就可以开始使用其部分结果。
 
-## 1.7 Time–Space Duality: Array vs Vector Processors
+稍后会继续讨论 VL 和链式执行。先来看另一个重要的思维模型：时间与空间。
 
-It helps to visualize data-parallel machines along two axes: how much hardware you replicate in *space*, and how much work you schedule across *time*.
+## 1.7 时间-空间对偶：阵列处理器与向量处理器
 
-As shown in Figure 1-3, array processors scale performance spatially by replicating processing elements, while vector processors scale performance temporally by streaming data through pipelined functional units. Both models execute single instructions over multiple data elements, but expose different trade-offs in hardware complexity and programmability.
+理解数据并行机器时，可以从两个维度观察：在*空间*上复制多少硬件，以及在*时间*上调度多少工作。
 
-![Time–space duality of data-parallel architectures](fig1-3.png)
+如图 1-3 所示，阵列处理器通过复制处理单元在空间上扩展性能，向量处理器则通过让数据流经流水化功能单元，在时间上扩展性能。两种模型都用单一指令处理多个数据元素，但在硬件复杂度和可编程性方面呈现不同的取舍。
 
-**Figure 1-3.** Time–space duality of data-parallel architectures.
+![数据并行架构的时间-空间对偶](images/fig1-3.png)
 
-### 1.7.1 Array Processors
+**图 1-3　数据并行架构的时间-空间对偶**
 
-In an array processor, you duplicate multiple processing units side by side. For example:
+### 1.7.1 阵列处理器
 
-- 4 processing elements (PEs)
-- Each PE executes the same instruction, in lockstep, on different data
+阵列处理器把多个处理单元并排复制。例如：
 
-In each time step:
+- 4 个处理单元（processing element，PE）；
+- 每个 PE 以锁步方式执行同一条指令，但处理不同的数据。
 
-- PE0 processes element 0
-- PE1 processes element 1
-- PE2 processes element 2
-- PE3 processes element 3
+在每一个时间步中：
 
-The instruction stream is broadcast; data streams are distinct. This is a very "spatial" view: scale performance by adding more PEs.
+- PE0 处理元素 0；
+- PE1 处理元素 1；
+- PE2 处理元素 2；
+- PE3 处理元素 3。
 
-### 1.7.2 Vector Processors
+指令流被广播到各个 PE，而数据流彼此不同。这是一种典型的“空间化”模型：通过增加 PE 数量来扩展性能。
 
-A vector processor can be thought of more like a deep pipeline over time.
+### 1.7.2 向量处理器
 
-Consider a sequence of three vector instructions: VLOAD, VADD, VMUL over a vector of length 64.
+向量处理器更像是一条沿时间展开的深流水线。
 
-- Internally, the VLOAD might move data in chunks (say 4 elements at a time).
-- The moment the first chunk is loaded, VADD can begin operating on it.
-- When VADD has partial results, VMUL can begin.
+以长度为 64 的向量为例，依次执行三条向量指令：`VLOAD`、`VADD` 和 `VMUL`。
 
-The pipeline looks like a scalar pipeline, but each stage processes a chunk of the vector. You still have multiple functional units (lanes), but the key is that data flows through the pipeline over time.
+- `VLOAD` 在内部可以分块搬运数据，例如每次处理 4 个元素；
+- 第一块数据一经加载，`VADD` 就可以开始处理；
+- `VADD` 产生部分结果后，`VMUL` 也可以随即开始。
 
-If a full vector instruction is conceptually "Load 64 elements," in hardware that might:
+它很像一条标量流水线，只是各级处理的是向量数据块。硬件中仍有多个功能单元或通道，关键则在于数据会随时间连续流过这些流水级。
 
-- Break into 16 micro-ops of "load 4 elements" each
-- Forward the results from each micro-op to subsequent operations as soon as they're ready
+如果一条完整的向量指令在概念上表示“加载 64 个元素”，那么硬件可以：
 
-You can imagine the same total throughput as four SIMD operations per cycle, but the model exposes *fewer instructions* to software and more structure to hardware.
+- 把它拆成 16 个“每次加载 4 个元素”的微操作；
+- 每个微操作的结果一旦就绪，就立即转发给后续操作。
 
-## 1.8 Chaining: The Secret Sauce
+这种组织可以达到与每周期执行四路 SIMD 运算相当的总吞吐率，但软件需要发出的指令更少，硬件也获得了更多可供调度的信息。
 
-The term chaining is crucial to vector processors.
+## 1.8 链式执行：向量处理器的关键机制
 
-In a scalar pipeline, an instruction typically must complete before its result is used by the next instruction (barring forwarding from a single execution unit). As shown in Figure 1-4, chaining allows downstream vector instructions to consume partial results from upstream instructions before full completion. This overlap reduces apparent latency and sustains throughput without speculative execution or wide instruction issue.
+链式执行是理解向量处理器的关键术语。
 
-![Vector instruction chaining across pipelined functional units](fig1-4.png)
+在标量流水线中，若不考虑常见的旁路转发，下一条指令通常要等前一条指令产生结果后才能继续。如图 1-4 所示，链式执行把这种转发扩展到向量内部：上游指令尚未处理完整个向量，下游指令便可消费已经产生的那部分结果。它不依赖推测执行或超宽发射，却能降低长向量的表观延迟并维持吞吐率。
 
-**Figure 1-4.** Vector instruction chaining across pipelined functional units.
+![流水化功能单元之间的向量指令链式执行](images/fig1-4.png)
 
-In a vector machine:
+**图 1-4　流水化功能单元之间的向量指令链式执行**
 
-- A single vector instruction is internally decomposed into multiple element groups or lanes.
-- As soon as one group's result becomes available (say, the first 8 elements), that partial result can be chained into the next vector instruction.
-- The second vector instruction can start working on those elements immediately, even though the first vector instruction is still working on later elements (3 more cycles to complete the vector load operation).
+在向量处理器中：
 
-This allows:
+- 一条向量指令在内部被拆成多个按元素组推进的微操作；
+- 某一组结果一旦就绪，例如前 8 个元素已经完成，就可以直接送往下一条向量指令；
+- 第二条指令可以立即处理这些元素，即使第一条指令还在处理后续元素，例如向量加载还需要 3 个周期才能全部完成。
 
-- Higher throughput
-- Lower apparent latency for long vectors
-- Better utilization of functional units
+由此可以获得：
 
-Chaining is what makes a vector processor more than "just a big SIMD unit." SIMD units can forward results between instructions, but they don't treat a single instruction as a pipeline of multiple micro-ops whose partial results can stream into subsequent vector operations.
+- 更高的吞吐率；
+- 对长向量而言更低的表观延迟；
+- 更高的功能单元利用率。
 
-In this book, when we say "vector processor", we generally mean an implementation that supports this sort of internal micro-op decomposition and chaining.
+链式执行的关键，是后续指令能够使用前序指令已经产生的部分元素。定宽 SIMD 也可以拆成微操作并提供旁路；这里比较的是典型执行方式，而不是两类硬件不可逾越的边界。
 
-## 1.9 From MMX to AVX-512: A Brief History Lesson
+本书讨论的向量处理器主要采用这种分片执行和链式衔接方式。RVV 规范本身并不要求实现必须支持链式执行，也不规定微操作如何拆分。
 
-To appreciate the design of RVV, it's worth taking a quick look at how x86 SIMD evolved (see ["The Evolution of SIMD: From SSE to AVX-512 and Beyond"](https://www.linkedin.com/pulse/evolution-simd-from-sse-avx-512-beyond-md-jannatul-nayem-yfabc/) by Md. Jannatul Nayem):
+## 1.9 从 MMX 到 AVX-512：一段简短历史
 
-- **MMX (1990s):**
-  - 64-bit registers
-  - Integer operations over 8-, 16-, and 32-bit elements
+要理解 RVV 的设计取向，值得简要回顾 x86 SIMD 的演进过程（参见 Md. Jannatul Nayem 的文章 [“The Evolution of SIMD: From SSE to AVX-512 and Beyond”](https://www.linkedin.com/pulse/evolution-simd-from-sse-avx-512-beyond-md-jannatul-nayem-yfabc/)）：
 
-- **SSE and successors:**
-  - 128-bit registers
-  - Added floating-point support
-  - More operations for graphics, media, and scientific computing
+- **MMX（20 世纪 90 年代）**
+  - 64 位寄存器；
+  - 对 8 位、16 位和 32 位元素执行整数运算。
 
-- **AVX:**
-  - 256-bit registers
-  - Wider operations, more throughput
+- **SSE 及其后续扩展**
+  - 128 位寄存器；
+  - 增加浮点支持；
+  - 为图形、媒体和科学计算加入更多操作。
 
-- **AVX-512:**
-  - 512-bit registers
-  - Many new instructions, masking, and more sophisticated operations
+- **AVX**
+  - 256 位寄存器；
+  - 更宽的运算和更高的吞吐率。
 
-At every step, Intel added more instructions, new encodings, and new complexity. The ISA grew large, and supporting all generations at once is costly in hardware and software.
+- **AVX-512**
+  - 512 位寄存器；
+  - 大量新指令、掩码以及更复杂的操作。
 
-RISC-V vectors deliberately avoid this trap by:
+每扩展一次宽度，Intel 都要加入更多指令和新编码，也随之引入额外复杂度。ISA 因而不断膨胀，同时兼容所有代际也让硬件和软件付出很高成本。
 
-- Separating the instruction semantics from the actual vector width
-- Making the vector length and element width programmable at runtime
-- Letting the implementation choose the physical VLEN (vector register width) while the software queries and adapts via VL and VTYPE
+RISC-V 向量扩展有意避开这条路径：
 
-The goal: one ISA, many implementations, from narrow embedded cores to wide data-center engines, without endless new instruction variants.
+- 将指令语义与实际向量宽度解耦；
+- 允许在运行时配置向量长度和元素位宽；
+- 由实现选择物理 VLEN（向量寄存器宽度），软件则通过 VL 和 `vtype` 查询并适配。
 
-## 1.10 An RVV Vector Processor at a Glance
+目标是用一套 ISA 覆盖从小型嵌入式核到数据中心宽执行引擎的多种实现，而不必为每种向量宽度增加指令变体。
 
-At a high level, a RISC-V core with vector support looks like this:
+## 1.10 RVV 向量处理器概览
 
-- **Scalar core**
-  - Integer register file (x-registers)
-  - Optional scalar floating-point register file (f-registers)
-  - Scalar functional units and load/store units
+从整体结构看，一个支持向量扩展的 RISC-V 处理器核包含：
 
-- **Vector unit**
-  - Vector register file (v-registers)
-  - Vector arithmetic and logical functional units (include both integer and floating-point)
-  - Vector permutation units
-  - Vector load/store unit(s)
-  - Control logic, including dependency tracking (scoreboard, queues)
+- **标量核**
+  - 整数寄存器文件（x 寄存器）；
+  - 可选的标量浮点寄存器文件（f 寄存器）；
+  - 标量功能单元和加载/存储单元。
 
-The vector register file is substantially wider than scalar registers. For example, in a design with 512-bit vector registers:
+- **向量单元**
+  - 向量寄存器文件（v 寄存器）；
+  - 整数和浮点向量算术/逻辑功能单元；
+  - 向量置换单元；
+  - 向量加载/存储单元；
+  - 包括记分牌和队列在内的依赖跟踪与控制逻辑。
 
-- Each vector register holds multiple elements, depending on the chosen SEW (Selected Element Width):
-  - SEW=8 → 64 elements per register
-  - SEW=16 → 32 elements per register
-  - SEW=32 → 16 elements per register
-  - SEW=64 → 8 elements per register
+向量寄存器文件比标量寄存器宽得多。例如，在一个向量寄存器宽度为 512 位的设计中，每个向量寄存器能够容纳的元素数量取决于选定元素位宽 SEW：
 
-There are typically 32 vector registers (v0–v31), the same number of scalar and floating point registers for the simplicity of using the same source and destination register bit fields in the instruction mnemonics.
+- SEW=8：每个寄存器 64 个元素；
+- SEW=16：每个寄存器 32 个元素；
+- SEW=32：每个寄存器 16 个元素；
+- SEW=64：每个寄存器 8 个元素。
 
-A vector instruction might say: "Add vector register v1 to v2 and store into v3." Internally, the vector unit reads the appropriate elements from the vector register file, feeds them to the functional units, and writes the results back, potentially over many cycles, and potentially chained with other instructions.
+RVV 定义了 32 个向量寄存器 `v0`～`v31`。它们与标量整数寄存器和浮点寄存器一样，都可用 5 位字段编号，从而保持源、目的寄存器字段的编码形式规整一致。
 
-## 1.11 Lanes and Locality
+一条向量指令可以表示：“将向量寄存器 `v1` 与 `v2` 相加，结果写入 `v3`。”在内部，向量单元从向量寄存器文件读出相应元素，送入功能单元，再把结果写回。整个过程可能持续多个周期，也可能与其他指令进行链式执行。
 
-To achieve high clock frequencies, vector implementations are usually divided into lanes.
+## 1.11 通道与局部性
 
-- Each lane handles a subset of the elements for each vector register.
-- For instance, in a 512-bit design with 4 lanes, each lane might operate on 128 bits of each vector register at a time.
-- The vector register file is physically partitioned across these lanes.
+为了达到较高时钟频率，向量实现通常被划分为多个通道（lane）。
 
-The benefit:
+- 每个通道负责各个向量寄存器中的一部分元素；
+- 例如，在一个 512 位、4 通道的设计中，每个通道每次可以处理某个向量寄存器的 128 位数据；
+- 向量寄存器文件在物理上也按这些通道进行分区。
 
-- Wiring is shorter within each lane, which improves timing and allows scalability by using multiple lanes.
-- Each lane can have its own local functional units (ALU, multiplier, load/store slice).
-- Synchronization across lanes is simplified because each lane processes a consistent portion of the vector.
+这种设计的优点包括：
 
-When we later discuss chaining, strip mining, and VL, it's helpful to imagine that each instruction is being "stretched" across these lanes over multiple cycles.
+- 每个通道内部的连线更短，有利于时序收敛，也便于通过增加通道数扩展实现；
+- 每个通道可以拥有本地功能单元，如 ALU、乘法器和加载/存储分片；
+- 每个通道按照固定映射处理向量中的一部分元素，因此跨通道同步更容易组织。
 
-## 1.12 Strip Mining: Handling Arbitrary Vector Sizes
+后续讨论链式执行、分段处理和 VL 时，可以把每条指令想象成在这些通道上跨多个周期“展开”。
 
-Real programs rarely operate on arrays whose length matches the maximum number of elements you can hold in a single vector register. If your vector registers can hold 64 elements (VLEN=512 bits, SEW=8), what happens if you need to process 200 elements?
+## 1.12 分段处理：适应任意向量长度
 
-You apply strip mining, a software pattern that breaks an iteration space into chunks that fit the hardware.
+实际程序所处理的数组长度很少恰好等于单个向量寄存器能够容纳的最大元素数。如果 VLEN=512 位、SEW=8，一个寄存器可以容纳 64 个元素，那么要处理 200 个元素时该怎么办？
 
-Suppose:
+答案是采用分段处理（strip mining）：软件把完整迭代空间拆成适合硬件容量的若干数据段。
 
-- VLEN / SEW = 64 elements per register (VLMAX)
-- You have N = 200 elements to process
+假设：
 
-You can structure your loop as:
+- LMUL=1，VLEN / SEW = 每个寄存器 64 个元素，因此 VLMAX=64；
+- 待处理元素总数 N=200。
 
-1. Set VL = 64, process elements 0–63
-2. Set VL = 64, process elements 64–127
-3. Set VL = 64, process elements 128–191
-4. Set VL = 8, process elements 192–199 (the remaining 8 elements)
+假设实现每轮优先取满 VLMAX，循环可以组织为：
 
-This way:
+1. 设置 VL=64，处理元素 0～63；
+2. 设置 VL=64，处理元素 64～127；
+3. 设置 VL=64，处理元素 128～191；
+4. 设置 VL=8，处理剩余的元素 192～199。
 
-- The hardware always processes at most VL elements.
-- The vector length, VL, is a programmable value stored in a CSR.
-- The hardware doesn't need to "know" the total N; it just respects VL.
+这样：
 
-Strip mining is entirely a software pattern, but RVV provides mechanisms (VL, VLMAX, and loop idioms) that make this pattern efficient and natural.
+- 硬件每次最多只处理 VL 个元素；
+- 向量长度 VL 是保存在 CSR 中的可编程值；
+- 硬件不需要“知道”总长度 N，只需遵守当前 VL。
 
-Strip mining can also be performed in reverse order, which is especially useful when the total number of elements is not known in advance. In this approach, the partial chunk is processed first (for example, VL = 8 for elements [192:199]), and subsequent iterations use the full VL while stepping backward through the remaining data. Reverse-order strip mining is advantageous when data is naturally aligned at the end of an array, when an algorithm already traverses data from high addresses to low, or when decrementing a pointer toward zero simplifies loop control.
+分段处理本身是一种软件循环模式；RVV 提供了 VL、VLMAX 及配套的配置指令，使这种写法既自然又高效。
 
-![Strip mining using programmable vector length](fig1-5.png)
+分段处理也可以按地址递减的方向进行。例如，在已知数组末端和长度的情况下，可以先用 VL=8 处理元素 192～199，再向低地址移动，逐段处理其余数据。这适合原本就需要逆序遍历的算法。
 
-**Figure 1-5.** Strip mining using programmable vector length (VL).
+> **译注：**原文把逆序分段与“总长度未知”联系起来，但它们是两个独立问题。先处理末尾余数的示例需要已知边界；长度未知的字符串扫描等场景，则通常需要终止条件检测及后文介绍的仅首元素故障加载。
 
-Large iteration spaces are processed in chunks that fit within the maximum vector length supported by the hardware. The final iteration uses a reduced VL to handle remaining elements, allowing vectorized code to operate on arrays of arbitrary size without special-case scalar cleanup.
+![使用可编程向量长度进行分段处理](images/fig1-5.png)
 
-A critical feature that enables efficient strip mining is the **first fault load instruction**. This instruction handles an important edge case: what happens when you don't know exactly how much data you can load without hitting a memory boundary or page fault?
+**图 1-5　使用可编程向量长度 VL 进行分段处理**
 
-## 1.13 Static vs Dynamic Instructions: Why Vectors Are Efficient
+较大的迭代空间被拆成若干不超过硬件最大向量长度的数据段。最后一次迭代使用较小的 VL 处理剩余元素，因此向量化代码可以处理任意长度的数组，而无需额外的标量收尾代码。
 
-Consider a simple scalar loop:
+高效分段处理还会用到一种重要指令：**仅首元素故障加载（fault-only-first load）**。它适用于软件无法预先确定还能安全读取多少数据、又不希望后续元素的故障立即中断整条指令的场景。
+
+## 1.13 静态指令与动态指令：向量为何高效
+
+考虑一个简单的标量循环：
 
 ```c
 for (int i = 0; i < 64; i++) {
@@ -333,330 +342,372 @@ for (int i = 0; i < 64; i++) {
 }
 ```
 
-A scalar compiler targeting a scalar core will generate:
+面向标量核的编译器通常会生成：
 
-- Loop setup: initialize i, set loop bounds
-- Inside each iteration: load x[i], multiply by a, load y[i], add, store y[i], increment i, branch
+- 循环初始化：初始化 `i` 并设置循环边界；
+- 每次迭代：加载 `x[i]`、乘以 `a`、加载 `y[i]`、执行加法、写回 `y[i]`、递增 `i`，然后执行分支。
 
-![Scalar loop execution](fig1-6.png)
+![标量循环执行](images/fig1-6.png)
 
-You might end up with:
+最终可能出现：
 
-- A dozen or so instructions in the loop body
-- 64 iterations
-- On the order of hundreds of dynamic instructions executed
+- 循环体包含十余条指令；
+- 循环执行 64 次；
+- 实际执行数百条动态指令。
 
-Now with a vector processor and a VLEN that supports 64 elements at the chosen SEW:
+如果向量处理器在当前 SEW 下的 VLEN 能够容纳 64 个元素，则可以：
 
-- You set up vector registers once
-- One vector load gets 64 elements of x
-- One vector multiply multiplies all 64 elements by a
-- One vector load gets 64 elements of y
-- One vector add adds across all 64 elements
-- One vector store writes back all 64 elements
+- 完成一次向量配置；
+- 用一条向量加载指令取得 64 个 `x` 元素；
+- 用一条向量乘法指令把 64 个元素分别乘以 `a`；
+- 用一条向量加载指令取得 64 个 `y` 元素；
+- 用一条向量加法指令完成全部加法；
+- 用一条向量存储指令写回全部 64 个元素。
 
-Roughly six or so vector instructions can replace hundreds of scalar ones. Static instruction count and dynamic instruction count both drop dramatically.
+大约六条向量指令就可以替代数百条标量动态指令，静态指令数和动态指令数都会显著下降。
 
-![Vector execution comparison](fig1-7.png)
+![向量执行对比](images/fig1-7.png)
 
-This reduction in instruction traffic:
+指令流量的减少可以：
 
-- Frees up your front-end pipeline
-- Lowers power due to fewer instruction fetches and decodes – the most significant is a single vector load or store instead of 64 scalar loads or 64 scalar stores
-- Simplifies dependency graphs at the scalar level (vector dependencies are handled inside the vector engine)
+- 释放前端流水线资源；
+- 减少取指和译码次数，从而降低功耗；最直观的例子，是用一条向量加载或存储指令替代 64 条标量指令；
+- 简化标量层面的依赖图，因为向量内部依赖由向量引擎处理。
 
-RVV is designed so that these vector instructions remain high-level and flexible, not tied to a specific physical vector width.
+RVV 让这些指令保持足够高的抽象层次和灵活性，不与某一种物理向量宽度绑定。
 
-## 1.14 The Real Hardware Challenges
+## 1.14 真正的硬件挑战
 
-If vector processors are so good, why not just keep making them wider and wider?
+既然向量处理器如此高效，为什么不继续把它做得越来越宽？
 
-Two main reasons: ports and stalls. The current AI and ML applications require large data sets for decision making which signifies the importance of vector processors.
+主要有两个原因：端口和停顿。AI/ML 应用的数据规模固然让向量处理器更有价值，也会把这两类硬件问题进一步放大。
 
-### 1.14.1 Register File Ports
+### 1.14.1 寄存器文件端口
 
-The vector register file is enormous compared to scalar registers:
+与标量寄存器相比，向量寄存器文件极其庞大：
 
-- With 512-bit registers, 32 vector registers, and multiple functional units, the number of bits that must be read and written each cycle adds up quickly.
-- To keep all these functional units fed, you need multiple read and write ports on the register file.
-- But each additional port on a large register file adds:
-  - Silicon area
-  - Power consumption
-  - Timing complexity (longer wires, more capacitance)
+- 当寄存器宽度为 512 位、数量为 32，并且存在多个功能单元时，每周期需要读写的总位数会迅速增长；
+- 为了持续向所有功能单元供数，寄存器文件需要多个读端口和写端口；
+- 但大型寄存器文件每增加一个端口，都会增加：
+  - 芯片面积；
+  - 功耗；
+  - 时序复杂度，包括更长的连线和更大的电容负载。
 
-If you try to give every unit a fully parallel view of a huge register file, the design becomes physically impractical.
+如果让每个功能单元都能够完全并行地访问一个巨大的寄存器文件，物理实现很快就会变得不可行。
 
-This drives the need for careful design of lanes, limited port counts, and intelligent scheduling and chaining.
+因此，设计者必须谨慎划分通道、限制端口数量，并采用合理的调度和链式执行策略。
 
-### 1.14.2 Pipeline Stalls at 512 Bits and Beyond
+### 1.14.2 512 位及更宽流水线的停顿问题
 
-When you stall a scalar pipeline, you're freezing something like 64 bits of data at a time (one 64-bit value moving through a stage).
+标量流水线停顿时，每一级可能只需冻结约 64 位数据，也就是正在流经该级的一个 64 位数值。
 
-When you stall a vector pipeline with 512-bit datapaths across multiple stages:
+而当数据通路宽度为 512 位、流水线又包含多个级时，一次向量流水线停顿意味着：
 
-- You are stalling hundreds or thousands of bits at once. Stalling means that the data must be held in register until the operation can be resumed.
-- Pipeline registers become large and switching all those bits consumes power and affects timing.
+- 同时冻结数百乃至数千位数据。所谓停顿，就是把这些数据保持在寄存器中，直到操作能够恢复；
+- 流水寄存器本身很宽，对这些比特进行时钟控制、更新和保持都会增加功耗与时序压力。
 
-Designers must carefully choose:
+设计者必须慎重决定：
 
-- How wide each stage is
-- How many elements are processed per cycle per lane
-- How to forward partial results without creating enormous stall and flush paths
-- Algorithm choices: (1) actual stalling (2) scheduling so data flows without stalling or (3) replay of the operation. The last two are "fire-and-forget" approaches—once an operation is issued, it proceeds without blocking the pipeline, either by careful scheduling that guarantees data availability or by replaying operations when hazards are detected.
+- 每一级采用多宽的数据通路；
+- 每个通道每周期处理多少元素；
+- 如何转发部分结果，同时避免构造庞大的停顿和流水线清空网络；
+- 采用哪种执行策略：第一，真正停顿；第二，通过调度保证数据连续流动而不发生停顿；第三，发现冒险时重放操作。后两种属于“发射后自主完成（fire-and-forget）”思路：操作一旦发射，便不阻塞流水线，或者由调度预先保证数据可用，或者在检测到冒险时重放。
 
-### 1.14.3 Out-of-Order Execution and Precise Exceptions
+### 1.14.3 乱序执行与精确异常
 
-Scalar out-of-order cores rely heavily on:
+标量乱序核通常高度依赖：
 
-- Register renaming to create a large physical register file
-- Reorder buffers (ROB)
-- Scoreboards
+- 寄存器重命名及更大的物理寄存器文件；
+- 重排序缓冲区（reorder buffer，ROB）；
+- 记分牌（scoreboard）。
 
-Extending these concepts naively to 512-bit vector registers multiplies the storage requirements:
+如果简单地把这些机制扩展到 512 位向量寄存器，存储开销会成倍增长：
 
-- A ROB tracking 128 or 256 in-flight instructions, each potentially associated with 512-bit vector results, becomes prohibitively large.
-- Supporting precise exceptions (e.g., interrupts that must see the architectural state "as if" a given instruction has completed or not) becomes very complex if you allow arbitrary interruption of long vector operations.
+- 同时保留 128 或 256 条在途指令关联的宽向量结果，会显著增加存储和管理成本；
+- 若允许长向量指令在执行中途被中断，就必须记录已完成的元素范围，并保证异常处理后能够正确恢复。
 
-RVV's design—via vstart, vl, vmasks, and well-defined instruction semantics—provides mechanisms for implementations to handle these issues in different ways without violating the spec.
+> **译注：**宽结果不一定保存在 ROB 表项中，也可以位于物理寄存器文件或结果缓冲区。RVV 的精确陷入还允许当前指令部分完成，通过 `vstart` 恢复；它不要求每条向量指令都只能“全部完成或完全未执行”。
 
-The core message: vector design is not just "wider ALUs." It's a fundamentally different set of trade-offs around bandwidth, latency, and state management.
+RVV 通过 `vstart`、`vl`、向量掩码和定义清晰的指令语义，为不同实现提供了处理这些问题的机制，同时不违反规范。
 
-To understand how vector processors navigate these constraints, we need to look at the mechanism behind out-of-order execution itself—specifically, whether it truly requires register renaming or whether a scoreboard can provide the same freedom.
+核心结论是：向量设计并不只是“更宽的 ALU”，而是在带宽、延迟和状态管理方面采用一套根本不同的取舍。
 
-### 1.14.4 Out-of-Order Execution Without Register Renaming
+要理解向量处理器如何在这些约束下工作，需要进一步分析乱序执行背后的机制，尤其要回答一个问题：乱序执行是否一定需要寄存器重命名，还是记分牌也能提供足够的调度自由度？
 
-A common misconception in processor architecture is that out-of-order execution requires register renaming. This is not necessarily true, and understanding why reveals an important design choice available to vector processor architects. The actual rule for out-of-order execution is when the instruction is free of data dependencies, then it can be executed at any time.
+### 1.14.4 不使用寄存器重命名的乱序执行
 
-With register renaming, the data dependency is simply to only the read-after-write (RAW). As long as the instruction is free of RAW data dependency, then the instruction can be executed at any time.
+处理器架构中有一种常见误解：乱序执行一定依赖寄存器重命名。事实并非如此，这也为向量处理器提供了一种重要设计选择。乱序调度真正需要满足的条件是：一条指令所受的相关约束已经解除，资源也已就绪，便可以在合适的时刻执行。
 
-Without register renaming, the data dependency consists of read-after-write (RAW), write-after-write (WAW), and write-after-read (WAR). As long as the instruction is free of all the data dependencies, RAW, WAW, and WAR, then the instruction can be executed at any time. For example, about WAW data dependency: if two instructions write to different registers, they can execute out of order; if two instructions write to the same register, the second cannot write to the same register until the first completes.
+寄存器重命名消除了由寄存器名称复用造成的 WAR 和 WAW 约束，仍须等待 RAW（read-after-write，写后读）依赖的源数据就绪。源数据、执行资源以及必要的访存和控制条件均满足后，指令才可以执行。
 
-The key distinction is when instructions execute relative to the commit point: if instructions execute only after reaching the commit point, register renaming is not required (though you must track dependencies to prevent all data dependency hazards); if instructions execute speculatively before committing, register renaming greatly simplifies handling dependencies and rollback on mispredictions or exceptions.
+不使用寄存器重命名时，则必须同时跟踪：
 
-This design choice offers a trade-off: you gain out-of-order execution benefits without the area and power cost of rename logic, at the expense of some performance when instructions have true dependencies. For vector processors where many operations are independent (different elements, different registers), this can be an attractive design point.
+- 写后读（RAW）；
+- 写后写（write-after-write，WAW）；
+- 读后写（write-after-read，WAR）。
 
-### 1.14.5 State Management Philosophy
+只有避开上述三类冒险后，指令才能执行。以 WAW 为例：两条指令写不同寄存器时可以乱序执行；若都写同一个寄存器，后一条就不能抢在前一条之前覆盖它。
 
-A fundamental design principle of the RISC-V Vector Extension is that most high-level state management—including vector register state and control state—comes from the CPU, not the VPU. The VPU doesn't need to know how state changes; it only needs to know the current state values.
+另一个关键区别，是指令相对于提交点在何时执行。如果指令只有到达提交点后才真正执行，则不一定需要寄存器重命名，但必须跟踪所有数据依赖并防止相应冒险。如果指令在提交前进行推测执行，寄存器重命名则能显著简化依赖处理，以及分支预测错误或异常发生时的状态回滚。
 
-This architectural decision has profound implications for implementation complexity. By moving all CSR state change logic to the CPU, the VPU design becomes dramatically simpler. The VPU can focus purely on vector execution without the complexity of tracking state evolution. This was a key factor in enabling teams to complete vector processors in record time—the complexity budget was spent wisely on the CPU's state management rather than duplicating it in the VPU.
+这是一项明确的设计取舍：不使用重命名逻辑，可以节省面积和功耗，同时仍获得一部分乱序执行收益；代价是在存在名称依赖时损失一些性能。向量处理器中的许多操作彼此独立，例如作用于不同元素或不同寄存器，因此这种方案可能很有吸引力。
 
-The complexity of state tracking also depends on whether the CPU is in-order or out-of-order. In-order processors make state tracking relatively straightforward—you always know the precise order in which state changes occur. When the CPU becomes out-of-order, tracking vector register states becomes significantly more challenging and requires more sophisticated implementation techniques, such as the re-order buffer. This is an important consideration for high-performance vector processors.
+### 1.14.5 状态管理理念
 
-## 1.15 Key Terminology in RISC-V Vectors
+我采用的一项实现原则是：让 CPU 统一跟踪向量配置和相关控制状态，再把每条指令需要的状态值交给向量处理单元（VPU）。这样，VPU 不必重复跟踪配置如何变化，而可以专注于执行。
 
-Before we go deeper, we need a shared vocabulary. Some of these terms come directly from the RVV specification; others are shorthand commonly used by designers and programmers.
+> **译注：**这里说的是控制状态的管理分工，不是把 VRF 数据搬到 CPU 中保存，也不意味着 VPU 完全无状态；它仍需维护执行进度和结果。该分工属于作者的微架构方案，并非 RVV 的唯一实现方式。
 
-Where implementation examples are provided, they are illustrative microarchitectural design points, not requirements of the RISC-V Vector ISA, and are included solely to demonstrate the range of implementation choices available to designers.
+集中管理 CSR 更新，可以减少 CPU 与 VPU 两边重复的控制逻辑。在我的经验中，这也有助于缩短开发周期：复杂的状态跟踪只需在一处处理和验证。
 
-### 1.15.1 XRF, FRF and VRF
+状态跟踪的难度还取决于 CPU 是顺序执行还是乱序执行。顺序处理器中的状态跟踪相对直接，因为状态变化的精确顺序始终明确。CPU 采用乱序执行后，跟踪向量寄存器状态会困难得多，需要 ROB 等更复杂的实现技术。对高性能向量处理器而言，这是一个重要设计因素。
 
-**XRF (Scalar Register File):**
-The scalar register file: x0–x31, each XLEN bits wide (typically 64 bits in a 64-bit core). For RISC-V, x0 is not an actual register, reading x0 will get 0 and writing x0 in most cases is a no-operation.
+## 1.15 RISC-V 向量扩展的关键术语
 
-**FRF (Floating-point Register File):**
-The floating-point register file: f0–f31, each FLEN bits wide (typically 64 bits in a 64-bit core).
+在继续深入之前，需要先统一术语。其中一些直接来自 RVV 规范，另一些则是设计者和程序员常用的简称。
 
-**VRF (Vector Register File):**
-The vector register file: v0–v31, each VLEN bits wide (implementation-dependent: 128, 256, 512, etc.).
+本节给出的实现示例只是用于说明设计者可选择的微架构设计点，并非 RISC-V 向量 ISA 的强制要求。
 
-### 1.15.2 XLEN, FLEN and VLEN
+### 1.15.1 XRF、FRF 与 VRF
 
-**XLEN:**
-The width (in bits) of scalar registers. Commonly 32 or 64 bits.
+**XRF（Scalar Register File，标量寄存器文件）：**
 
-**FLEN:**
-The width (in bits) of floating-point registers. Commonly 32 or 64 bits.
+标量整数寄存器文件包含 `x0`～`x31`，每个寄存器宽度为 XLEN。`x0` 恒为 0，写入的结果会被丢弃。不过，把目的寄存器设为 `x0` 不代表整条指令都是空操作：例如加载指令仍可能触发异常或产生规定的访存效果。
 
-**VLEN:**
-The width (in bits) of each vector register in the implementation. For example: 128 bits, 256 bits, or 512 bits.
+**FRF（Floating-point Register File，浮点寄存器文件）：**
 
-**DLEN:**
-The datapath width of the functional units. DLEN is not defined by the RISC-V Vector ISA and is entirely implementation-specific. Some implementations choose internal datapaths smaller than VLEN for smaller area or wider than VLEN to improve throughput. The ISA remains agnostic to these choices. The following examples illustrate possible DLEN and VLEN relationships in different microarchitectural designs:
+浮点寄存器文件包含 `f0`～`f31`，每个寄存器宽度为 FLEN。FLEN 取决于所支持的标量浮点扩展，例如 F 对应 32 位、D 对应 64 位，并不由整数寄存器宽度 XLEN 决定。
 
-- **Example 1:** VLEN = 1024, DLEN = 512, LMUL = 16
-  - This example illustrates an implementation where the internal datapath width (DLEN) is smaller than the architectural vector register width, requiring multiple cycles to process a full register group.
+**VRF（Vector Register File，向量寄存器文件）：**
 
-- **Example 2:** VLEN = 1024, DLEN = 2048, LMUL = 4
-  - This example illustrates an implementation where the internal datapath width exceeds the architectural vector width, allowing multiple vector register groups to be processed concurrently within a single cycle.
+向量寄存器文件 `v0`～`v31`，每个寄存器宽度为 VLEN。VLEN 取决于具体实现，例如 128、256 或 512 位。
 
-Software must not assume any particular DLEN value or relationship between DLEN and VLEN; all such choices are strictly microarchitectural and invisible to the ISA.
+### 1.15.2 XLEN、FLEN、VLEN 与 DLEN
 
-While VLEN is fixed for a given implementation, software must not hard-code it. Instead, programs use the vector CSRs to query and adapt.
+**XLEN：**
 
-### 1.15.3 SEW — Selected Element Width
+标量整数寄存器的位宽，常见取值为 32 或 64 位。
 
-SEW (Selected Element Width) is the size (in bits) of each element inside a vector register for a given operation. It is software-configurable and must be a power of two:
+**FLEN：**
 
-- 8, 16, 32, 64 bits (standard integer and floating-point sizes)
-- The spec allows larger sizes (e.g., 128, 256 up to 1024 bits), but in practice many commercial implementations support up to 64 bits for performance and area reasons.
-- Unfortunately, the ISA spec does not specify a smaller width of 4-bit, where using of 4-bit width requires custom instructions.
+浮点寄存器的位宽，常见取值为 32 或 64 位。
 
-For a given VLEN and SEW, the number of elements per vector register is:
+**VLEN：**
 
+具体实现中每个向量寄存器的位宽，例如 128、256 或 512 位。
+
+**DLEN：**
+
+功能单元的数据通路宽度。DLEN 并不是 RISC-V 向量 ISA 定义的参数，而是完全由实现决定。为了减小面积，有些实现选择比 VLEN 更窄的内部数据通路；为了提高吞吐率，另一些实现则选择比 VLEN 更宽的数据通路。ISA 对这些选择保持透明。下面给出两种可能的微架构关系：
+
+- **示例 1：**VLEN=1024、DLEN=512、LMUL=8
+  - 内部数据通路 DLEN 小于体系结构向量寄存器宽度，因此处理完整寄存器组需要多个周期。
+
+- **示例 2：**VLEN=1024、DLEN=2048、LMUL=4
+  - 内部数据通路比单个体系结构向量寄存器更宽，因此一拍可以覆盖同一寄存器组中两个寄存器的数据。
+
+> **译注：**原文第一个示例写作 LMUL=16，但 RVV 1.0 的整数 LMUL 仅支持 1、2、4、8，此处改用合法的 LMUL=8。DLEN 可以改变内部处理拍数，却不会改变体系结构 LMUL 或 EMUL。
+
+软件不得假设特定 DLEN，也不得假设 DLEN 与 VLEN 之间存在某种固定关系。这些都是严格意义上的微架构选择，对 ISA 不可见。
+
+对于某个具体实现，VLEN 是固定的。要保持跨实现可移植性，软件应通过 `vsetvl*` 或 `vlenb` 等接口适配，避免把 VLEN 写死在通用代码中。
+
+### 1.15.3 SEW——选定元素位宽
+
+SEW（Selected Element Width，选定元素位宽）表示某次向量操作中每个元素的位数。SEW 由软件配置，并且必须是 2 的幂：
+
+- 8、16、32、64 位，对应常见的整数和浮点数据宽度；
+- RVV 1.0 已定义的 SEW 编码对应 8、16、32、64 位，更大的编码值保留给未来扩展；
+- 遗憾的是，标准 ISA 没有规定 4 位元素宽度，若要使用 4 位数据，通常需要自定义指令。
+
+给定 VLEN 和 SEW，每个向量寄存器可容纳的元素数为：
+
+```text
+每寄存器元素数 = VLEN / SEW
 ```
-Elements per register = VLEN / SEW
-```
 
-**SEW in Load/Store Operations:** An important implementation detail is that load and store instructions can operate with their own effective SEW and effective LMUL that may differ from the values stored in the CSR. For example, the load operation is for a byte which will be signed extended to the standard SEW of the VPU for execution where the standard SEW can be half-word, word, or double-word. The CPU can compute and send these effective values to the VPU along with the instruction, allowing more flexible data movement patterns. This means the instruction encoding or the CPU can override or specify different widths for memory operations versus computational operations.
+**加载/存储操作中的元素宽度：**单位步长和固定步长指令在编码中指定数据的有效元素位宽 EEW，相应的有效寄存器分组倍数为 `EMUL = (EEW/SEW) × LMUL`。索引访存有所不同：指令编码指定的是索引元素的 EEW，数据元素仍按 SEW 解释。CPU 可以先解析这些参数，再随指令送往 VPU。RVV 1.0 的普通窄元素加载不会自动完成符号扩展；若计算需要更宽的数据，还要使用 `vsext`、`vzext` 等独立指令。早期草案曾提供加载并扩展的组合形式。
 
-### 1.15.4 LMUL: Grouping Vector Registers
+### 1.15.4 LMUL：向量寄存器分组
 
-RVV allows register grouping, a powerful idea that logically "glues" multiple vector registers together to form a wider logical vector.
+RVV 支持寄存器分组，即把多个向量寄存器在逻辑上“拼接”为一个更宽的逻辑向量。
 
-This is controlled by LMUL (often pronounced "L-mul"), the vector register group multiplier:
+分组大小由 LMUL（Vector Register Group Multiplier，向量寄存器组倍增系数，常读作“L-mul”）控制：
 
-- **LMUL = 1:** Each logical vector register is one physical vector register. You have 32 logical registers of width VLEN.
-- **LMUL = 2:** Each logical vector register is actually two physical registers. You have 16 logical registers, each 2×VLEN bits wide.
-- **LMUL = 4:** 8 logical registers, each 4×VLEN bits wide.
-- **LMUL = 8:** 4 logical registers, each 8×VLEN bits wide.
+- **LMUL=1：**每个操作数使用一个体系结构向量寄存器，共有 32 个可独立使用的寄存器；
+- **LMUL=2：**两个相邻寄存器组成一组，共可组成 16 个互不重叠的组，每组宽 2×VLEN；
+- **LMUL=4：**共可组成 8 组，每组宽 4×VLEN；
+- **LMUL=8：**共可组成 4 组，每组宽 8×VLEN。
 
-There are also fractional LMULs (1/2, 1/4, 1/8) used for certain narrow data patterns, but the main idea is that you can trade register count for register width.
+这里讨论的是软件可见的寄存器组织，不是芯片上物理存储阵列的数量。实际 VRF 可以分存储体、分通道实现，也可以采用寄存器重命名。
 
-This grouping is described in the vtype CSR and affects how registers are allocated and addressed. For example, if LMUL=2, a logical destination register v8 actually uses physical registers v8 and v9. Note that DLEN implementation can change the effective LMUL to be larger or smaller than the architecture LMUL.
+RVV 还定义了 1/2、1/4 和 1/8 等分数 LMUL，便于组织窄数据和混合精度计算。核心思想是：软件可以在可用寄存器组数量与单个逻辑操作数的有效宽度之间取舍。
 
-### 1.15.5 VL and VLMAX
+分组信息由 `vtype` 描述，并影响寄存器的分配和寻址。例如，LMUL=2 的普通同宽操作以 `v8` 为目的时，会使用体系结构寄存器 `v8` 和 `v9`。各操作数的有效分组由 `EMUL = (EEW/SEW) × LMUL` 决定；DLEN 只影响内部执行宽度和拍数，不参与这个公式。
 
-**VLMAX** is the maximum number of elements that can fit in a vector register group for the chosen SEW and LMUL:
+### 1.15.5 VL 与 VLMAX
 
-```
+**VLMAX** 是在给定 SEW 和 LMUL 时，一个向量寄存器组最多能够容纳的元素数：
+
+```text
 VLMAX = (VLEN / SEW) × LMUL
 ```
 
-**VL** is the current vector length, a programmable value ≤ VLMAX, stored in the vl CSR. A programmable value > VLMAX will set VL=VLMAX.
+**VL** 是保存在 `vl` CSR 中的当前向量长度，不大于 VLMAX。软件向配置指令提供所需元素数 AVL，硬件按规范返回实际 VL。AVL 不超过 VLMAX 时，VL 就等于 AVL；超过时则按规范选择一个不大于 VLMAX 的值，具体规则见第 3 章 3.8.1 节。
 
-VL controls how many elements are *active* for the next vector operation:
+VL 与 `vstart`、掩码共同决定普通逐元素指令中哪些元素参与运算：
 
-- Elements with index < VL are active and may be read/written.
-- Elements with index ≥ VL are undisturbed or written for that operation depending on setting of the CSR.
-- For further complication, the RVV defines the inactive elements as agnostic (any value) or undisturbed (retain the previous value). The reason for agnostic value is because of out-of-order implementation with register renaming where an extra register file port is needed for read-modify-write of the destination register.
+- 处于 `vstart ≤ i < VL` 范围内，且未被掩码关闭的元素，才是活动元素；
+- 索引不小于 VL 的尾部元素，根据 CSR 配置可以保持原值，也可以按该操作规定的策略写入；
+- 对普通数据目的元素，不关心（agnostic）策略允许保留旧值或写成全 1，保持（undisturbed）策略要求保留旧值。软件不能依赖不关心区域中的具体值。掩码结果的尾部有额外规则，见第 3 章。采用不关心策略，可避免重命名实现为了保留无用元素而额外读取旧目的寄存器。
 
-By programming VL on each iteration of a strip-mined loop, software can efficiently process arrays of arbitrary length.
+在分段循环的每次迭代中配置 VL，软件就能够高效处理任意长度的数组。
 
-### 1.15.6 Masks (VRF v0 can be used as the mask)
+### 1.15.6 掩码：`v0` 可作为掩码寄存器
 
-RVV supports per-element masking—think of it as predication at the element level.
+RVV 支持逐元素掩码，可以把它理解为元素粒度的谓词执行。
 
-The vector register v0 is reserved (by convention) for use as the mask register.
+按 RVV 的指令语义，向量寄存器 `v0` 用作掩码操作数。`v0` 中的每一位对应向量操作中的一个元素：
 
-Each bit in v0 corresponds to one element in a vector operation:
+- 掩码位为 1：对应元素活动；
+- 掩码位为 0：对应元素不活动；根据控制位，可以保持原目的元素，也可以采用规范允许的其他结果策略。
 
-- Mask bit = 1 → element is active
-- Mask bit = 0 → element is inactive: the result is either undisturbed (previous value kept) or set to a defined fill value, depending on control bits.
+掩码可以用于：
 
-Masks let you:
+- 在向量循环中实现条件操作，例如只处理满足某个条件的元素；
+- 处理尾部元素和边界条件；
+- 与 VL 结合，形成更灵活的循环形态。
 
-- Implement conditionals within vector loops (e.g., operate only on elements that meet a criterion).
-- Handle tail elements and edge conditions.
-- Combine with VL for flexible loop shapes.
+向量指令编码通常通过第 25 位 `vm` 区分两种形式：
 
-The encoding of vector instructions (bit 25) often comes in two forms:
+- 非掩码形式：隐含所有活动范围内的元素都参与运算；
+- 掩码形式：使用 `v0` 作为掩码，由指令编码中的 `vm` 位选择。
 
-- Unmasked: implicitly all elements active
-- Masked: uses v0 as a mask; an extra bit in the instruction encoding selects this form
+### 1.15.7 `vtype`、`vstart` 与 `vl`
 
-### 1.15.7 vtype, vstart, and vl
+RVV 的几个核心控制与状态寄存器如下。
 
-Several control and status registers (CSRs) are central to RVV:
+**`vtype`：**
 
-**vtype:**
-- Encodes SEW, LMUL, and some implementation-defined behavior flags.
-- Determines the element width and grouping for subsequent vector instructions.
+- 编码 SEW、LMUL 以及尾部/掩码策略等行为控制位；
+- 决定后续向量指令采用的元素位宽和寄存器分组方式。
 
-**vl:**
-- The current vector length in elements.
-- Set by vector configuration instructions (like vsetvl*).
+**`vl`：**
 
-**vstart:**
-- Indicates the starting element index for the next vector instruction.
-- Used to support precise exceptions and resuming partial vector operations. The vstart register is reset to 0 after successful execution of any vector instruction.
-- Normally zero in straight-line code.
+- 以元素数表示的当前向量长度；
+- 由 `vsetvl*` 等向量配置指令设置。
 
-There are also flags controlling whether masked-off elements preserve their previous value (undisturbed) or can be overwritten with a defined pattern. These implementation choices are communicated via bits in vtype and the spec's rules about tail and mask behavior.
+**`vstart`：**
 
-### 1.15.8 DLEN: Datapath Width
+- 指定下一条向量指令开始执行的元素索引；
+- 用于支持精确异常和部分执行后的恢复；任何向量指令成功完成后，`vstart` 都会复位为 0；
+- 在普通直线代码中通常为 0。
 
-DLEN (Datapath Width) is an implementation-specific parameter that defines the width of the internal datapath in the vector unit. Unlike VLEN, which is architecturally visible, DLEN is purely a microarchitectural choice that doesn't change the ISA semantics.
+此外，`vtype` 中还有控制被掩码关闭的元素和尾部元素是保持旧值还是允许为不关心值的标志位。具体行为由 `vtype` 的控制位以及规范关于 tail/mask 策略的规则共同确定。
 
-The DLEN concept represents one way implementers can exceed architectural minimums to achieve better performance, particularly for applications with high data throughput requirements:
+### 1.15.8 DLEN：数据通路宽度
 
-- The implementation can optimize bandwidth utilization while maintaining ISA compatibility
-- Data movement and processing become more efficient without changing the programmer-visible architecture
-- The hardware can work with wider datapaths internally than what is exposed at the architectural level
+DLEN（Datapath Width，数据通路宽度）是向量单元内部数据通路的实现参数。与体系结构可见的 VLEN 不同，DLEN 完全属于微架构选择，不改变 ISA 语义。
 
-DLEN can be smaller than, equal to, or larger than VLEN:
+设计者可以借助 DLEN 调整内部并行度，满足不同应用的吞吐需求：
 
-- **DLEN < VLEN:** The implementation processes each vector register over multiple cycles. For example, with VLEN=512 and DLEN=128, a single vector operation takes 4 cycles to complete.
-- **DLEN = VLEN:** The datapath matches the register width, processing one full vector register per cycle.
-- **DLEN > VLEN:** The implementation can process multiple vector registers simultaneously, improving throughput for register groups. For example, with VLEN=512 and DLEN=1024, an LMUL=2 operation can complete in a single cycle.
+- 在保持 ISA 兼容的同时优化带宽利用率；
+- 在不改变程序员可见架构的前提下提高数据搬运和处理效率；
+- 必要时采用宽于单个体系结构向量寄存器的数据通路。
 
-This flexibility allows designers to tune the datapath width for their target workload and power/area constraints without affecting software compatibility.
+DLEN 可以小于、等于或大于 VLEN：
 
-## 1.16 A Note on Implementation Limits (Why SEW Often Stops at 64)
+- **DLEN < VLEN：**一个向量寄存器分多拍送入数据通路。例如 VLEN=512、DLEN=128 时，覆盖完整寄存器需要 4 拍输入；
+- **DLEN = VLEN：**数据通路与寄存器同宽，一拍输入可覆盖一个完整寄存器；
+- **DLEN > VLEN：**一拍输入可以覆盖多个寄存器。例如 VLEN=512、DLEN=1024 时，一个 LMUL=2 的同宽操作可以一拍送完完整寄存器组。
 
-"If the architecture allows element widths up to 1024 bits, why not implement 128-bit or 256-bit elements in hardware? Why stop at 64?"
+这些例子假设端口带宽充足，且功能单元每周期都能接收新数据。“送完”不等于“执行完成”：总延迟还要计入功能单元的流水线延迟及可能的停顿。
 
-The answer illustrates the tension between architectural possibility and commercial feasibility.
+这种灵活性允许设计者根据目标工作负载和功耗、性能、面积（PPA）约束调整内部数据通路，同时保持软件兼容性。
 
-- Architecturally, there is no hard limit: the spec allows SEW values up to large sizes.
-- In silicon, each increase in SEW dramatically increases area and power for multipliers, adders, and shifters.
-- Most real-world customers today want high performance on 32- and 64-bit data. They are not willing to pay the area/power cost for native 128-bit integer or floating-point vector operations.
+## 1.16 为什么更宽元素需要额外权衡
 
-So many commercial implementations support:
+“如果继续扩展元素位宽，为什么不直接支持 128 位或 256 位运算？”
 
-- Integer SEW values from 8 to 64 bits
-- Floating-point SEW values from 16 to 64 bits
+这个问题需要同时从标准边界和工程成本来看。
 
-If market demand changes—for example, for large-precision cryptographic workloads—you could see cores with larger SEW support. The ISA doesn't forbid it; the market and PPA (power, performance, area) trade-offs simply don't make it common today.
+- 从标准上看，RVV 1.0 将更大的 SEW 编码保留给未来扩展，尚未将其定义为可以直接使用的标准配置；
+- 在芯片实现中，SEW 每增加一级，乘法器、加法器和移位器的面积与功耗都会显著增加；
+- 当下大多数实际客户主要要求 32 位和 64 位数据的高性能，不愿为原生 128 位整数或浮点向量运算承担相应面积和功耗成本。
 
-## 1.17 Putting It All Together: A Mental Model
+原文列举的常见硬件覆盖范围包括：
 
-Let's summarize the conceptual model you should carry into the next chapters.
+- 8～64 位整数 SEW；
+- 16～64 位浮点 SEW。
 
-- **RVV is a scalable vector ISA**, not just a fixed-width SIMD extension.
-  - The same instructions can run efficiently on different VLENs.
-  - Programs adapt via vsetvl* and vl.
+如果市场需求发生变化，例如高精度密码学工作负载变得普遍，更宽元素就可能值得通过后续标准扩展或自定义指令实现。届时仍需在需求、性能、面积和功耗之间权衡。
 
-- **A vector register file is fixed width and holds multiple elements**, with element width (SEW) and grouping (LMUL) configured by software.
-  - Change SEW → change how many elements fit in a register.
-  - Change LMUL → trade register count for effective register width.
+> **译注：**原文把“为更大 SEW 预留编码”写成了“已经允许最高 1024 位 SEW”，这里依据 RVV 1.0 纠正。完整 V 扩展要求支持 32 位和 64 位浮点；16 位向量浮点由 Zvfh/Zvfhmin 等扩展另行定义，不能只根据 SEW 判断支持哪些浮点格式。
 
-- **VL controls how many elements are active** for each vector instruction.
-  - VL <= VLMAX.
-  - Strip-mined loops adjust VL each iteration to process arbitrary-length arrays.
+## 1.17 建立完整的思维模型
 
-- **Masks (in v0) allow fine-grained predication**, letting you selectively enable or disable elements within a vector operation, beyond what VL alone can express.
+下面总结进入后续章节前应当掌握的概念模型。
 
-- **Chaining allows downstream vector instructions to start early**, using partial results from upstream instructions without waiting for full completion.
+- **RVV 是一套可伸缩向量 ISA，而不只是定宽 SIMD 扩展。**
+  - 同一组指令可以在不同 VLEN 的实现上高效运行；
+  - 程序通过 `vsetvl*` 和 `vl` 动态适配。
 
-- **Implementation costs and complexity** (ports, stall paths, ROB size, precise exceptions) heavily influence how wide and how aggressive vector hardware can be.
-  - The ISA is flexible enough to support different implementations.
-  - Your job as a programmer or architect is to leverage the ISA features without assuming a specific microarchitecture.
+- **向量寄存器文件具有固定的实现宽度，并在其中保存多个元素；元素位宽 SEW 和寄存器分组 LMUL 由软件配置。**
+  - 改变 SEW，就会改变一个寄存器可以容纳的元素数；
+  - 改变 LMUL，则是在逻辑寄存器数量和有效寄存器宽度之间取舍。
 
-## 1.18 What Comes Next
+- **VL 规定普通向量操作的元素范围上界。**
+  - VL≤VLMAX；
+  - `vstart=0` 且无掩码时，普通逐元素指令处理 VL 个元素；
+  - 分段循环在每次迭代中调整 VL，以处理任意长度的数组。
 
-This chapter has given you:
+- **`v0` 掩码提供细粒度谓词执行。**
+  - 它可以在单次向量操作内选择性启用或关闭元素，表达能力超过单独使用 VL。
 
-- The historical context of SIMD and vector machines
-- The reasons RVV looks very different from classic SIMD extensions
-- The first round of terminology—VLEN, XLEN, FLEN, SEW, LMUL, VL, masks, vtype, vstart
-- A sense of the hardware realities behind wide vector designs
+- **链式执行允许下游向量指令提前启动。**
+  - 后续指令可以消费上游指令已经产生的元素组，而无需等待完整向量操作结束。
 
-In Chapter 2, we will:
+- **端口、停顿路径、ROB 容量和精确异常等实现成本，会显著影响向量硬件能够做多宽、执行多激进。**
+  - ISA 足够灵活，可以容纳不同实现；
+  - 程序员和架构师应利用 ISA 提供的能力，同时避免假设某一种具体微架构。
 
-- Explore how the conceptual ideas from Chapter 1 map to real silicon in a production RVV core
-- Understand the difference between configurable, extensible, and programmable parameters
-- See how chaining and lanes work in an actual 512-bit vector implementation
-- Learn about the microarchitectural challenges of building wide vector processors
+## 1.18 下一章内容
 
-By the time you finish that chapter, you'll understand not just what RVV instructions do conceptually, but how they map to the microarchitectural structures that execute them—from lanes and register files to chaining logic and memory pipelines.
+本章介绍了：
 
-For now, if you only remember one thing from this chapter, let it be this:
+- SIMD 和向量处理器的历史背景；
+- RVV 与经典 SIMD 扩展采用不同设计的原因；
+- 第一组核心术语：VLEN、XLEN、FLEN、SEW、LMUL、VL、掩码、`vtype` 和 `vstart`；
+- 宽向量设计背后的真实硬件约束。
 
-> **RISC-V vectors are about scaling performance across time and hardware generations, not just about making registers wider.**
+第 2 章将：
 
-The decision to decouple the ISA from a fixed vector width enables RVV cores to scale from small embedded controllers to large data-center processors, all while executing the same vectorized code.
+- 说明第 1 章的概念如何映射到实际 RVV 处理器核；
+- 区分可配置（configurable）、可扩展（extensible）和可编程（programmable）参数；
+- 展示一个实际 512 位向量实现中的链式执行和通道组织；
+- 分析构建宽向量处理器时面临的微架构挑战。
 
-**See this in action:** the SimplEx performance model reveals exactly where cycles are won or lost in a RISC-V vector architecture — cache misses and branch mispredictions, visualized cycle by cycle. [Watch a walkthrough on YouTube →](https://www.youtube.com/watch?v=NJCtiVtHmhU)
+读完第 2 章，你不仅会理解 RVV 指令在概念上完成什么，还会知道它们如何映射到真正执行这些指令的微架构结构，包括通道、寄存器文件、链式执行逻辑和存储流水线。
 
-Any questions, email the author [thang@simplexmicro.com](mailto:thang@simplexmicro.com).
+现在，如果本章只记住一句话，请记住：
+
+> **RISC-V 向量扩展的核心，是让性能能够跨时间和硬件代际伸缩，而不只是把寄存器做得更宽。**
+
+ISA 与固定向量宽度解耦后，同一套向量化代码既可以运行在小型嵌入式控制器上，也可以运行在大型数据中心处理器上。
+
+**查看实际效果：**SimplEx 性能模型可以逐周期呈现 RISC-V 向量架构中的性能得失，包括缓存未命中和分支预测错误造成的影响。[在 YouTube 观看演示](https://www.youtube.com/watch?v=NJCtiVtHmhU)。
+
+如有问题，可通过 [thang@simplexmicro.com](mailto:thang@simplexmicro.com) 联系原作者。
+
+
+---
+
+## 支持原作与反馈
+
+*译者附记*
+
+**如果这篇内容对你有帮助，欢迎访问 [Simplex Micro 官网](https://www.simplexmicro.com)，并向原作者分享你的阅读反馈。** 这是作者在授权交流中特别提出的期待，也是支持这份教程继续完善的一种方式。
+
+反馈不必很长：哪一章最有帮助、哪个概念仍不清楚、希望增加哪些算例，都值得告诉作者。作者不阅读中文，建议使用简短英文，并注明来自 *RISC-V Vector Primer* 中文译本。
+
+中文翻译的用词、错漏或排版问题，请在译文评论区或中文译稿仓库反馈，由译者跟进；不要将译文中的问题视为原作者已经审定的内容。
